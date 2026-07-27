@@ -1,0 +1,31 @@
+FROM node:22-slim
+
+LABEL maintainer="corv"
+LABEL description="Contained OpenCode v2 — serves the API for Hermes to drive"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git zsh ripgrep fd-find curl ca-certificates \
+        python3 python3-venv python3-pip python3-dev build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @opencode-ai/cli@0.0.0-next-15919
+
+# uv / uvx (fast Python package & env manager) from the official distroless image.
+# Placed after the (stable) apt/npm layers so a moving uv:latest only rebuilds
+# cheap trailing layers. UV_TOOL_BIN_DIR puts `uv tool install` binaries on PATH.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+
+WORKDIR /work
+
+ENV OPENCODE_CONFIG=/root/.config/opencode/opencode-v2.json
+
+EXPOSE 45650
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -sS -o /dev/null http://127.0.0.1:45650/ 2>/dev/null || exit 1
+
+CMD ["opencode2", "serve", "--hostname", "0.0.0.0", "--port", "45650"]
