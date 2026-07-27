@@ -11,6 +11,13 @@ RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --s
 # Symlink the agent into a path the webui init already searches.
 RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
 
+# Voice channel dependencies: opus codec (Discord VC playback),
+# ffmpeg (audio conversion), portaudio (microphone input).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ffmpeg libopus0 libopus-dev portaudio19-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install opencode2 CLI (thin client for driving the sibling opencode container)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm \
@@ -33,6 +40,9 @@ if old in c:
 else:
     print("WARNING: could not find hermes-agent prune line")
 PYEOF
+
+# Patch docker_init.bash: install [messaging] + [voice] Python extras alongside [all].
+RUN sed -i 's/$_stage_src\[all\]/$_stage_src[all,messaging,voice]/' /hermeswebui_init.bash
 
 # Bake the opencode-driver skill into a dedicated root-owned dir, registered
 # via skills.external_dirs in config.yaml (see run.sh). Root-owned so Hermes

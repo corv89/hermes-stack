@@ -27,6 +27,14 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    import yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+    print("WARN: PyYAML not installed; falling back to overwrite behaviour",
+          file=sys.stderr)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 POD = "hermes"
 PROJECT_MOUNT = os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src"))
@@ -236,19 +244,67 @@ def wait_for(p: Probe) -> bool:
     return False
 
 
+def deep_merge_defaults(base: dict, defaults: dict) -> dict:
+    for key, def_val in defaults.items():
+        if key not in base:
+            base[key] = def_val
+        elif isinstance(def_val, dict) and isinstance(base[key], dict):
+            deep_merge_defaults(base[key], def_val)
+    return base
+
+
 def write_hermes_config() -> None:
     log("Restoring Hermes Z.AI config ...")
+
+    if not _HAS_YAML:
+        cmd = ["podman", "exec", "-i", "hermes-webui", "bash", "-c",
+               "cat > /home/hermeswebui/.hermes/config.yaml"]
+        for i in range(30):
+            try:
+                run(cmd, input_text=HERMES_CONFIG_YAML, quiet=True)
+                break
+            except RuntimeError:
+                if i == 29:
+                    log("WARN: could not write hermes config (continuing)")
+                    return
+                time.sleep(1)
+        log("Restarting hermes-webui to pick up config ...")
+        run(["podman", "restart", "hermes-webui"], quiet=True)
+        wait_for(Probe(name="hermes webui", http="http://127.0.0.1:8787/",
+                       timeout=60, interval=2))
+        return
+
+    for i in range(30):
+        try:
+            existing_raw = run(
+                ["podman", "exec", "hermes-webui", "cat",
+                 "/home/hermeswebui/.hermes/config.yaml"],
+                quiet=True,
+            ).stdout or ""
+            break
+        except RuntimeError:
+            if i == 29:
+                log("WARN: could not read hermes config (continuing)")
+                return
+            time.sleep(1)
+
+    existing = yaml.safe_load(existing_raw) or {}
+    defaults = yaml.safe_load(HERMES_CONFIG_YAML) or {}
+    merged = deep_merge_defaults(existing, defaults)
+    merged_yaml = yaml.safe_dump(merged, default_flow_style=False, sort_keys=False)
+
     cmd = ["podman", "exec", "-i", "hermes-webui", "bash", "-c",
            "cat > /home/hermeswebui/.hermes/config.yaml"]
     for i in range(30):
         try:
-            run(cmd, input_text=HERMES_CONFIG_YAML, quiet=True)
+            run(cmd, input_text=merged_yaml, quiet=True)
             break
         except RuntimeError:
             if i == 29:
                 log("WARN: could not write hermes config (continuing)")
                 return
             time.sleep(1)
+
     log("Restarting hermes-webui to pick up config ...")
     run(["podman", "restart", "hermes-webui"], quiet=True)
     wait_for(Probe(name="hermes webui", http="http://127.0.0.1:8787/",
