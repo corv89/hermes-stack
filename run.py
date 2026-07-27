@@ -458,7 +458,19 @@ def check_secrets_whitespace() -> None:
         log('      printf \'%s\' "$VALUE" | podman secret create <name> -   # then recreate the container')
 
 
+def build_images() -> None:
+    log('Building container images ...')
+    run(['podman', 'build', '-f', 'opencode.Containerfile', '-t', 'localhost/hermes-opencode:latest', str(SCRIPT_DIR)])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'web-tools/trafilatura/Containerfile'), '-t', 'localhost/hermes-trafilatura:latest', str(SCRIPT_DIR / 'web-tools/trafilatura')])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'web-tools/playwright/Containerfile'), '-t', 'localhost/hermes-playwright:latest', str(SCRIPT_DIR / 'web-tools/playwright')])
+    run(['podman', 'pull', 'docker.io/searxng/searxng:latest'])
+    run(['podman', 'build', '-f', 'hermes.Containerfile', '-t', 'localhost/hermes-webui:latest', str(SCRIPT_DIR)])
+
+
 def main() -> None:
+    if '--no-build' not in sys.argv:
+        build_images()
+
     cfg = load_env(SCRIPT_DIR / ".env")
     for key in ("OPENCODE_SERVER_PASSWORD", "HERMES_WEBUI_PASSWORD", "ZAI_API_KEY"):
         if not cfg.get(key):
