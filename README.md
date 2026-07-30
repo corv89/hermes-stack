@@ -76,6 +76,7 @@ with no GPU, no gbrain, and no add-ons.
 
 ```
 run.py                 orchestrator (entry point)
+setup-bindfs.sh        host-side bindfs setup (run with sudo) — see below
 images/                one dir per image we build (bare "Containerfile")
   webui/  opencode/  trafilatura/  playwright/  gbrain/
 skills/                Hermes agent skills (baked into the webui image)
@@ -167,8 +168,41 @@ tailscale serve --bg 8787                     # Hermes  -> https://<host>/
 tailscale serve --bg --https=8443 8181        # Sourcebot -> https://<host>:8443
 ```
 
+## Host file access (bindfs)
+
+Rootless podman maps the webui's in-container uid (your uid) onto a
+*subordinate* host uid (e.g. `525287` for `corv`), and Hermes writes its state
+`0600`/`0700`. Those files are therefore invisible to you on the host, and a
+shared group can't help — a `0600` mode zeroes the ACL/group mask, so only the
+owner can access them.
+
+`setup-bindfs.sh` mounts a [bindfs] view that remaps ownership
+`<webui-subuid> ↔ <you>`, so you can browse and edit Hermes' files as your own;
+your edits map back to the webui's subuid so Hermes keeps ownership. The agent
+stays uid-isolated — only a passive mount daemon runs as root.
+
+```bash
+sudo bash setup-bindfs.sh             # installs bindfs, mounts, writes fstab
+sudo bash setup-bindfs.sh --dry-run   # show the computed mapping, change nothing
+```
+
+| Mount | Backs |
+|-------|-------|
+| `~/hermes` | the `hermes-data` volume (config, sessions, skills, memories, state.db) |
+| `~/hermes-workspace` | the shared scratch space |
+
+The subordinate uid is computed dynamically (from `/etc/subuid`), and the mounts
+are boot-persistent via `nofail` fstab entries.
+
+> **Roadmap — de-podding:** the bindfs view is a workaround for the pod's shared
+> user namespace. Podman forbids a per-container `--userns=keep-id` inside a pod
+> that has an infra container (and forbids sharing a pod member's netns from
+> outside it), so true keep-id requires de-podding the stack. If we do that —
+> making bindfs unnecessary — the preference is **systemd Quadlets** over Compose.
+
 ## License
 
 [MIT](LICENSE)
 
 [Podman]: https://podman.io
+[bindfs]: https://github.com/mpartel/bindfs
