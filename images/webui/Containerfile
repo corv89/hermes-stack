@@ -1,0 +1,117 @@
+FROM ghcr.io/nesquena/hermes-webui:latest
+
+LABEL maintainer="corv"
+LABEL description="Hermes WebUI + Hermes Agent + opencode2 thin client"
+
+USER root
+
+# Install Hermes Agent (non-interactive, skip setup wizard)
+RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+
+# Symlink the agent into a path the webui init already searches.
+RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
+
+# Install the [all,messaging,voice] extras into the agent venv that the gateway
+# (via /usr/local/bin/hermes) actually runs in. The agent is an editable git
+# install in a uv-managed venv (no pip), so re-install it from the LOCAL source
+# with the extras using uv -- installing 'hermes-agent' from PyPI does not add
+# the extras to the editable install. Without this the gateway's Discord adapter
+# fails with "requirements not met". Mirrors the [all,messaging,voice] the
+# WebUI init installs into /app/venv.
+RUN uv pip install --python /usr/local/lib/hermes-agent/venv/bin/python \
+      -e '/usr/local/lib/hermes-agent[all,messaging,voice]'
+
+# Voice channel dependencies: opus codec (Discord VC playback),
+# ffmpeg (audio conversion), portaudio (microphone input).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ffmpeg libopus0 libopus-dev portaudio19-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install opencode2 CLI (thin client for driving the sibling opencode container)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g @opencode-ai/cli@0.0.0-next-15919 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Patch the startup init: prune ~/.hermes/bin from the chown walk.
+# The hermes-agent installs `tirith` into ~/.hermes/bin with a filesystem
+# lock that makes even root chown/rm fail with "Permission denied". Without
+# this prune, the init's chown walk aborts on tirith and kills startup.
+RUN python3 <<'PYEOF'
+from pathlib import Path
+p = Path("/hermeswebui_init.bash")
+c = p.read_text()
+BS = chr(92)
+NL = chr(10)
+# (1) prune ~/.hermes/bin from the chown walk (tirith lock)
+old = '    -path "/home/hermeswebui/.hermes/hermes-agent" -prune ' + BS
+add = NL + '    -o -path "/home/hermeswebui/.hermes/bin" -prune ' + BS
+if old in c:
+    c = c.replace(old, old + add, 1)
+    print("patched: ~/.hermes/bin pruned from chown walk")
+else:
+    print("WARNING: prune line not found")
+# (2) change UID/GID via sed (no recursive home chown -> avoids tirith lock)
+um_old = ('    groupmod -o -g "${WANTED_GID}" hermeswebui || error_exit "Failed to set GID of hermeswebui user"' + NL
+          + '    usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"')
+um_new = ('    # UID/GID via sed (not groupmod/usermod): skip the recursive home chown' + NL
+          + '    # that fails on the immutable tirith lock in ~/.hermes/bin; the pruned' + NL
+          + '    # chown_home_hermeswebui below sets ownership safely.' + NL
+          + '    sed -i -E "s/^hermeswebui:x:[0-9]+:[0-9]+:/hermeswebui:x:${WANTED_UID}:${WANTED_GID}:/" /etc/passwd || error_exit "Failed to set UID of hermeswebui user"' + NL
+          + '    sed -i -E "s/^hermeswebui:x:[0-9]+:/hermeswebui:x:${WANTED_GID}:/" /etc/group || error_exit "Failed to set GID of hermeswebui user"')
+if um_old in c:
+    c = c.replace(um_old, um_new, 1)
+    print("patched: UID/GID via sed (avoid usermod home chown)")
+else:
+    print("WARNING: groupmod/usermod lines not found")
+# (3) make the home chown non-fatal (locked/immutable files in the volume)
+ch_old = 'chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"'
+ch_new = 'chown_home_hermeswebui || echo "  !! WARNING: some locked files in /home/hermeswebui could not be chowned (continuing)"'
+if ch_old in c:
+    c = c.replace(ch_old, ch_new, 1)
+    print("patched: chown_home_hermeswebui non-fatal")
+else:
+    print("WARNING: chown call site not found")
+# (4) auto-start the messaging gateway (background) just before the webui server.
+# No `hermes gateway status` guard: it always exits 0 and gateway_state.json is
+# stale across container restarts, so a guard misfires. `gateway run` handles its
+# own flock singleton + stale-PID takeover, so starting it unconditionally is safe.
+gw_anchor = 'echo ""; echo "== Running hermes-webui"'
+gw_block = ('# Auto-start the messaging gateway (Docker foreground mode, backgrounded)' + NL
+            + '# so Discord/Telegram/etc. come up with the container. `gateway run`' + NL
+            + '# owns its own singleton + stale-PID takeover, so no guard is needed.' + NL
+            + 'echo ""; echo "== Starting messaging gateway (background)"' + NL
+            + 'mkdir -p "$HOME/.hermes/logs"' + NL
+            + 'nohup hermes --accept-hooks gateway run >> "$HOME/.hermes/logs/gateway-stdout.log" 2>&1 &' + NL
+            + 'echo "   gateway pid: $!"' + NL)
+if gw_anchor in c and 'Starting messaging gateway' not in c:
+    c = c.replace(gw_anchor, gw_block + gw_anchor, 1)
+    print("patched: gateway auto-start before webui server")
+else:
+    print("WARNING: gateway auto-start anchor not found / already patched")
+p.write_text(c)
+PYEOF
+
+# Patch docker_init.bash: install [messaging] + [voice] Python extras alongside [all].
+RUN sed -i 's/$_stage_src\[all\]/$_stage_src[all,messaging,voice]/' /hermeswebui_init.bash
+
+# Bake the opencode-driver skill into a dedicated root-owned dir, registered
+# via skills.external_dirs in config.yaml (see run.py). Root-owned so Hermes
+# (uid 501) can't modify/delete it; discovered by the agent via external_dirs.
+# Update by editing the host file and rebuilding the image.
+COPY skills/opencode-driver/SKILL.md \
+     /opt/hermes-skills/opencode-driver/SKILL.md
+
+# Bake the web-research skill (SearXNG/Trafilatura/Playwright search+extract flow).
+COPY skills/web-research/SKILL.md \
+     /opt/hermes-skills/web-research/SKILL.md
+
+# Bake the `oc` wrapper so Hermes can drive OpenCode with a one-liner.
+COPY --chmod=755 bin/oc /usr/local/bin/oc
+
+# Bake `ocm` so Hermes can switch the session model/agent via the API (the TUI's
+# Ctrl+X M model picker does not render through the PTY bridge).
+COPY --chmod=755 bin/ocm /usr/local/bin/ocm
+
+CMD ["/hermeswebui_init.bash"]

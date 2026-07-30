@@ -1,0 +1,25 @@
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+
+LABEL maintainer="corv"
+LABEL description="Playwright JS-rendering extraction API for Hermes (Trafilatura fallback)"
+
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# This image tag ships the browsers (/ms-playwright/chromium-1148) but NOT the
+# playwright Python package, so install it pinned to match the browser revision.
+RUN pip install --no-cache-dir \
+        fastapi \
+        uvicorn \
+        httpx \
+        playwright==1.49.0
+
+COPY images/playwright/app.py /app/app.py
+
+EXPOSE 8001
+
+HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=3)" || exit 1
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]

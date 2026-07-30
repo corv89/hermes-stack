@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""ocm - switch the model/agent of an OpenCode v2 session via the HTTP API.
+
+The OpenCode TUI model picker (Ctrl+X M) does not render through the Hermes PTY
+bridge, and the TUI has no --model flag. Use this instead to change the model
+(or agent) of the TUI's session; the change applies to subsequent prompts.
+
+Usage:
+    ocm <model-id>                     switch model on latest session (default provider)
+    ocm <provider>/<model-id>          explicit provider via slash syntax
+    ocm <model-id> --provider <pid>    explicit provider flag
+    ocm --agent <name>                 switch agent (build/plan) on latest session
+    ocm <model-id> --agent <name>      switch both
+    ocm --session <ses_id> ...         target a specific session (default: latest)
+    ocm --list                         list sessions (id, updated, agent, model)
+
+Env:
+    OPENCODE_SERVER_URL        server base url   (default http://127.0.0.1:45650)
+    OPENCODE_PASSWORD / OPENCODE_SERVER_PASSWORD   basic-auth password
+    OPENCODE_SERVER_USER       basic-auth user   (default opencode)
+    OC_MODEL_PROVIDER          default provider  (default bailian-personal)
+"""
+import argparse
+import base64
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+S = os.environ.get("OPENCODE_SERVER_URL", "http://127.0.0.1:45650").rstrip("/")
+PW = os.environ.get("OPENCODE_SERVER_PASSWORD") or os.environ.get("OPENCODE_PASSWORD") or ""
+USER = os.environ.get("OPENCODE_SERVER_USER", "opencode")
+AUTH = base64.b64encode(f"{USER}:{PW}".encode()).decode()
+DEFAULT_PROVIDER = os.environ.get("OC_MODEL_PROVIDER", "bailian-personal")
+
+
+def req(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(S + path, data=data, method=method)
+    r.add_header("Authorization", f"Basic {AUTH}")
+    if data:
+        r.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"_error": e.code, "_body": raw.decode(errors="replace")[:300]}
+    except Exception as e:  # noqa: BLE001
+        return {"_error": str(e)}
+
+
+def as_list(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        d = payload.get("data", payload)
+        return d if isinstance(d, list) else []
+    return []
+
+
+def sessions():
+    return as_list(req("GET", "/api/session"))
+
+
+def model_label(s):
+    m = s.get("model") or {}
+    pid = m.get("providerID")
+    mid = m.get("id")
+    if pid and mid:
+        return f"{pid}/{mid}"
+    return mid or "-"
+
+
+def list_sessions():
+    rows = sessions()
+    if not rows:
+        print("no sessions")
+        return
+    for s in sorted(rows, key=lambda x: (x.get("time") or {}).get("updated", 0), reverse=True):
+        upd = (s.get("time") or {}).get("updated", 0)
+        title = (s.get("title") or "")[:40]
+        print(f"{s.get('id')}  updated={upd}  agent={s.get('agent') or '-'}  "
+              f"model={model_label(s)}  title={title!r}")
+
+
+def latest_session_id():
+    rows = sessions()
+    if not rows:
+        return None
+    return max(rows, key=lambda x: (x.get("time") or {}).get("updated", 0)).get("id")
+
+
+def get_session(sid):
+    resp = req("GET", f"/api/session/{sid}")
+    return resp.get("data", resp) if isinstance(resp, dict) else {}
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="ocm",
+        description="Switch the model/agent of an OpenCode session via the API "
+                    "(the TUI's Ctrl+X M picker does not render through the PTY bridge).")
+    ap.add_argument("model", nargs="?", help="model id, or provider/model-id")
+    ap.add_argument("--provider", help="provider id (default: $OC_MODEL_PROVIDER or bailian-personal)")
+    ap.add_argument("--agent", help="agent name to switch to (e.g. build, plan)")
+    ap.add_argument("--session", help="target session id (default: most recently updated)")
+    ap.add_argument("--list", action="store_true", help="list sessions and exit")
+    args = ap.parse_args()
+
+    if args.list:
+        list_sessions()
+        return
+
+    if not args.model and not args.agent:
+        ap.error("specify a model id and/or --agent (or use --list)")
+
+    sid = args.session or latest_session_id()
+    if not sid:
+        print("ocm: no session found; start the OpenCode TUI first", file=sys.stderr)
+        sys.exit(1)
+
+    if args.model:
+        model_id = args.model
+        provider = args.provider or DEFAULT_PROVIDER
+        if "/" in args.model:
+            p, mid = args.model.split("/", 1)
+            provider = args.provider or p
+            model_id = mid
+        resp = req("POST", f"/api/session/{sid}/model",
+                   {"model": {"id": model_id, "providerID": provider}})
+        if isinstance(resp, dict) and resp.get("_error"):
+            print(f"ocm: switchModel failed: {json.dumps(resp)[:400]}", file=sys.stderr)
+            sys.exit(1)
+        print(f"ocm: {sid} model -> {provider}/{model_id}")
+
+    if args.agent:
+        resp = req("POST", f"/api/session/{sid}/agent", {"agent": args.agent})
+        if isinstance(resp, dict) and resp.get("_error"):
+            print(f"ocm: switchAgent failed: {json.dumps(resp)[:400]}", file=sys.stderr)
+            sys.exit(1)
+        print(f"ocm: {sid} agent -> {args.agent}")
+
+    cur = get_session(sid)
+    if cur:
+        print(f"ocm: now agent={cur.get('agent') or '-'} model={model_label(cur)}")
+
+
+if __name__ == "__main__":
+    main()

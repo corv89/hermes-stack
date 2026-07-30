@@ -1,0 +1,34 @@
+use_default_settings: true
+
+server:
+  # Local-only secret. Change before any non-local/production use.
+  secret_key: "hermes-searxng-local-secret-change-me"
+  # Disable the bot/rate limiter so local API calls aren't blocked.
+  limiter: false
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  # CRITICAL: enable the JSON API (default is html only).
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    engine: google
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: false
+  - name: brave
+    engine: brave
+    disabled: false
+  - name: bing
+    engine: bing
+    disabled: false
+  - name: wikipedia
+    engine: wikipedia
+    disabled: false

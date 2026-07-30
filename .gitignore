@@ -1,3 +1,7 @@
 .env
 build.log
 hermes-workspace/
+
+# Python
+__pycache__/
+*.pyc

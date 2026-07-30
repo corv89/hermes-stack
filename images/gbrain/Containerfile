@@ -1,0 +1,35 @@
+# gbrain Runtime Container
+# Bun + TypeScript runtime with gbrain pre-installed globally.
+# Serves the gbrain MCP HTTP server on port 8083.
+#
+# Build:
+#   podman build -t localhost/gbrain:latest -f images/gbrain/Containerfile .
+
+FROM docker.io/oven/bun:1-debian
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client \
+    netcat-openbsd \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gbrain globally
+RUN bun install -g github:garrytan/gbrain
+
+# Verify install
+RUN gbrain --version
+
+# Brain repo directory
+WORKDIR /root/brain
+
+# Copy entrypoint
+COPY images/gbrain/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV GBRAIN_HOME=/root
+ENV GBRAIN_FTS_LANGUAGE=english
+
+EXPOSE 8083
+
+ENTRYPOINT ["/entrypoint.sh"]

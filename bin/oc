@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""oc - drive the shared OpenCode v2 server through its HTTP API.
+
+One-shot or multi-turn coding tasks. Creates a session (or continues an existing
+one), sends the prompt, auto-approves permission requests, waits for the agent to
+finish, and prints the final reply to stdout. The session id is printed to stderr
+so a follow-up turn can continue the same session.
+
+Usage:
+    oc "task description"                     # new session, one-shot
+    oc --session <id> "follow-up"             # continue session <id> (multi-turn)
+    oc --continue "follow-up"                 # continue the most recently updated session
+    oc --model <id> [--provider <p>] "task"   # choose model for a NEW session
+    oc --agent <name> "task"                  # choose agent for a NEW session (build/plan)
+    oc --timeout <seconds> "task"
+
+For an existing/continued session, change the model/agent with `ocm` (the
+--model/--agent flags apply only when creating a new session).
+
+Env (flags override):
+    OPENCODE_SERVER_URL        server base url   (default http://127.0.0.1:45650)
+    OPENCODE_PASSWORD / OPENCODE_SERVER_PASSWORD   basic-auth password
+    OPENCODE_SERVER_USER       basic-auth user   (default opencode)
+    OC_AGENT                   agent             (default build)
+    OC_MODEL_PROVIDER          provider id       (default bailian-personal)
+    OC_MODEL_ID                model id          (default qwen3.7-plus)
+    OC_TIMEOUT                 max seconds       (default 600)
+
+The `opencode2 run --server` CLI is broken in this beta, so this drives the server
+through its HTTP API directly.
+"""
+import argparse
+import base64
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+S = os.environ.get("OPENCODE_SERVER_URL", "http://127.0.0.1:45650").rstrip("/")
+PW = os.environ.get("OPENCODE_SERVER_PASSWORD") or os.environ.get("OPENCODE_PASSWORD") or ""
+USER = os.environ.get("OPENCODE_SERVER_USER", "opencode")
+AUTH = base64.b64encode(f"{USER}:{PW}".encode()).decode()
+AGENT = os.environ.get("OC_AGENT", "build")
+MP = os.environ.get("OC_MODEL_PROVIDER", "bailian-personal")
+MI = os.environ.get("OC_MODEL_ID", "qwen3.7-plus")
+TIMEOUT = int(os.environ.get("OC_TIMEOUT", "600"))
+
+
+def req(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(S + path, data=data, method=method)
+    r.add_header("Authorization", f"Basic {AUTH}")
+    if data:
+        r.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"_error": e.code, "_body": raw.decode(errors="replace")[:300]}
+    except Exception as e:  # noqa: BLE001
+        return {"_error": str(e)}
+
+
+def as_list(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        d = payload.get("data", payload)
+        return d if isinstance(d, list) else []
+    return []
+
+
+def approve_permissions(sid):
+    perms = req("GET", f"/api/session/{sid}/permission")
+    for p in as_list(perms):
+        pid = p.get("id") or p.get("requestID")
+        if not pid:
+            continue
+        for body in ({"reply": "approve"}, {"action": "approve"}, {"approved": True}):
+            resp = req("POST", f"/api/session/{sid}/permission/{pid}/reply", body)
+            if not (isinstance(resp, dict) and resp.get("_error")):
+                break
+
+
+def messages(sid):
+    return as_list(req("GET", f"/api/session/{sid}/message"))
+
+
+def message_ids(sid):
+    return {m.get("id") for m in messages(sid) if m.get("id")}
+
+
+def latest_session_id():
+    rows = as_list(req("GET", "/api/session"))
+    if not rows:
+        return None
+    return max(rows, key=lambda x: (x.get("time") or {}).get("updated", 0)).get("id")
+
+
+def assistant_text(m):
+    parts = [c.get("text", "") for c in m.get("content", []) if c.get("type") == "text"]
+    return "\n".join(t for t in parts if t)
+
+
+def newest_assistant(msgs):
+    for m in msgs:
+        if m.get("type") == "assistant":
+            return m
+    return None
+
+
+def is_terminal(m):
+    """Completed and not about to run more tools.
+
+    Intermediate assistant turns finish with 'tool-calls' (more messages to
+    come); the final turn finishes with 'stop' (or another terminal reason).
+    Keying on `finish` avoids returning early on an intermediate turn that
+    already carries narration text but is not the final answer.
+    """
+    if not (m.get("time") or {}).get("completed"):
+        return False
+    return m.get("finish") != "tool-calls"
+
+
+def final_text(msgs, seen=None):
+    """Newest completed assistant message with text that isn't a pre-existing one."""
+    seen = seen or set()
+    for m in msgs:
+        if m.get("type") != "assistant":
+            continue
+        if m.get("id") in seen:
+            continue
+        if not (m.get("time") or {}).get("completed"):
+            continue
+        t = assistant_text(m)
+        if t:
+            return t
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="oc",
+        description="Drive the shared OpenCode v2 server (one-shot or multi-turn). "
+                    "Prints the final reply to stdout and the session id to stderr.")
+    ap.add_argument("task", nargs="*", help="task description / prompt")
+    ap.add_argument("--session", help="continue this session id (multi-turn)")
+    ap.add_argument("--continue", dest="cont", action="store_true",
+                    help="continue the most recently updated session")
+    ap.add_argument("--model", help="model id for a NEW session (env OC_MODEL_ID)")
+    ap.add_argument("--provider", help="provider id for a NEW session (env OC_MODEL_PROVIDER)")
+    ap.add_argument("--agent", help="agent for a NEW session (env OC_AGENT)")
+    ap.add_argument("--timeout", type=int, help="max seconds (env OC_TIMEOUT)")
+    args = ap.parse_args()
+
+    task = " ".join(args.task).strip()
+    if not task:
+        ap.error("a task description is required")
+
+    timeout = args.timeout or TIMEOUT
+
+    if args.session:
+        sid = args.session
+        seen = message_ids(sid)
+    elif args.cont:
+        sid = latest_session_id()
+        if not sid:
+            print("oc: no session to continue", file=sys.stderr)
+            sys.exit(1)
+        seen = message_ids(sid)
+    else:
+        agent = args.agent or AGENT
+        provider = args.provider or MP
+        model = args.model or MI
+        sess = req("POST", "/api/session", {
+            "agent": agent,
+            "model": {"id": model, "providerID": provider},
+        })
+        sid = (sess.get("data") or {}).get("id")
+        if not sid:
+            print(f"oc: failed to create session: {json.dumps(sess)[:300]}", file=sys.stderr)
+            sys.exit(1)
+        seen = set()
+
+    print(f"[oc] session={sid}", file=sys.stderr)
+
+    pr = req("POST", f"/api/session/{sid}/prompt", {"text": task})
+    if isinstance(pr, dict) and pr.get("_error"):
+        print(f"oc: prompt failed: {json.dumps(pr)[:300]}", file=sys.stderr)
+        sys.exit(1)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        approve_permissions(sid)
+        msgs = messages(sid)
+        last = newest_assistant(msgs)
+        if last is not None and last.get("id") not in seen and is_terminal(last):
+            err = last.get("error")
+            if err:
+                print(f"oc: agent error (finish={last.get('finish')!r}): "
+                      f"{json.dumps(err)[:500]}", file=sys.stderr)
+                sys.exit(1)
+            text = assistant_text(last) or final_text(msgs, seen)
+            if text:
+                print(text)
+                return
+            print(f"oc: agent finished (finish={last.get('finish')!r}) "
+                  f"but produced no text", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(2)
+
+    print("oc: timed out waiting for OpenCode to finish", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

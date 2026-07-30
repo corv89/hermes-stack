@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Hermes pod orchestrator (Python rewrite of run.sh). Stdlib only.
+"""Hermes pod orchestrator. Stdlib only.
 
 Creates the `hermes` pod and starts every container in dependency order with
 readiness probes. Re-runnable: it tears down and recreates the pod, but named
 volumes (opencode-data, hermes-data) and bind mounts persist, so no data is lost.
 
 Startup order (dependency-aware):
-  opencode (fatal) -> sidecar (model loads in background) -> gbrain-pg -> gbrain
+  opencode (fatal) -> sidecar (model loads in background)
+  -> llama-embed (CPU) -> llama-rerank (GPU) -> gbrain-pg -> gbrain
   -> hermes-webui (+ config restore) -> searxng/trafilatura/playwright
   -> wait for sidecar -> sourcebot
 
 Failure policy: only `opencode` is fatal (the stack is meaningless without the
 server Hermes drives). Everything else is warn-and-continue so an add-on hiccup
-never blocks the core opencode + webui stack. If postgres is not ready, gbrain
-is skipped (both are restart=no and cannot self-heal).
+never blocks the core opencode + webui stack. If the embed server or postgres is
+not ready, gbrain is skipped (both are restart=no and cannot self-heal).
+
+gbrain stack (fully local, no external API keys):
+  hermes-llama-embed   :8084  llama.cpp --embeddings (CPU, Qwen3-Embedding-4B, 2560d)
+  hermes-llama-rerank  :8085  llama.cpp --reranking  (GPU, Qwen3-Reranker-4B)
+  hermes-gbrain-pg     :5432  Postgres 17 + pgvector
+  hermes-gbrain        :8083  gbrain MCP HTTP server
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -39,8 +47,28 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 POD = "hermes"
 PROJECT_MOUNT = os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src"))
 
+GBRAIN_DATA_DIR = Path(os.environ.get("GBRAIN_DATA_DIR", "/opt/gbrain-data"))
+
 # 27B model load can be slow; sidecar starts early and we wait this long for it.
 SIDECAR_READY_TIMEOUT = 240
+
+# Model files for gbrain's local embedding/reranking servers.
+EMBED_MODEL_FILE = "Qwen3-Embedding-4B-Q4_K_M.gguf"
+EMBED_MODEL_URL = (
+    "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/"
+    "Qwen3-Embedding-4B-Q4_K_M.gguf"
+)
+RERANK_MODEL_FILE = "Qwen3-Reranker-4B-Q4_K_M.gguf"
+RERANK_MODEL_URL = (
+    "https://huggingface.co/DevQuasar/Qwen.Qwen3-Reranker-4B-GGUF/resolve/main/"
+    "Qwen.Qwen3-Reranker-4B.Q4_K_M.gguf"
+)
+
+LLAMA_IMAGE_CPU = "ghcr.io/ggml-org/llama.cpp:server"
+LLAMA_IMAGE_GPU = "ghcr.io/ggml-org/llama.cpp:server-rocm"
+# gfx1201/RDNA4-capable build: the official :server-rocm image's ROCm is too
+# old to see this GPU, so the reranker reuses the same custom image as the sidecar.
+LLAMA_IMAGE_ROCM = "localhost/llamacpp-sidecar:latest"
 
 # Env keys whose values must never appear in logs.
 SENSITIVE = {
@@ -51,6 +79,8 @@ SENSITIVE = {
     "OPENCODE_SERVER_PASSWORD",
     "OPENCODE_PASSWORD",
     "POSTGRES_PASSWORD",
+    "GBRAIN_ADMIN_BOOTSTRAP_TOKEN",
+    "GBRAIN_ADMIN_TOKEN",
 }
 
 # Restored into the webui container after first boot (Z.AI provider + baked-in skill).
@@ -62,6 +92,11 @@ model:
 skills:
   external_dirs:
     - /opt/hermes-skills
+mcp_servers:
+  gbrain:
+    url: http://localhost:8083/mcp
+    headers:
+      Authorization: "Bearer {gbrain_token}"
 """
 
 # Podman secrets used across the pod, mapped to a scratch env name used only for
@@ -71,7 +106,6 @@ POD_SECRETS = [
     ("sourcebot-keepa-api-key", "SB_KEEPA_API_KEY"),
     ("sourcebot-logfire-token", "SB_LOGFIRE_TOKEN"),
     ("gbrain-pg-password", "GB_PG_PASSWORD"),
-    ("gbrain-zhipu-key", "GB_ZHIPU_KEY"),
 ]
 
 # Runs inside a throwaway container: prints the scratch env names whose value has
@@ -85,6 +119,52 @@ _SECRET_CHECK_PY = (
     "        bad.append(name)\n"
     "print(','.join(bad))\n"
 )
+
+
+# Persisted DCR client credentials for the gbrain MCP server (host-side). The
+# access token is minted fresh each run (client_credentials, long TTL) and
+# injected into the Hermes config as a Bearer header.
+GBRAIN_CLIENT_STATE = GBRAIN_DATA_DIR / "config" / ".mcp-client.json"
+
+# Runs inside the pod (hermes-opencode shares the pod netns with gbrain): reads
+# client creds from stdin (or registers a new DCR client), mints a
+# client_credentials access token, prints {client_id, client_secret,
+# access_token} as JSON (or {"error": ...}) on stdout.
+_GBRAIN_MINT_PY = r'''
+import json, sys, urllib.request, urllib.parse
+BASE = "http://localhost:8083"
+def post(path, data, form=False):
+    body = urllib.parse.urlencode(data).encode() if form else json.dumps(data).encode()
+    ctype = "application/x-www-form-urlencoded" if form else "application/json"
+    req = urllib.request.Request(BASE + path, data=body, method="POST")
+    req.add_header("Content-Type", ctype)
+    req.add_header("Accept", "application/json, text/event-stream")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode() or "{}")
+try:
+    raw = sys.stdin.read().strip()
+    creds = json.loads(raw) if raw else None
+    if not creds:
+        reg = post("/register", {
+            "client_name": "hermes",
+            "redirect_uris": ["http://localhost/callback"],
+            "grant_types": ["client_credentials"],
+            "token_endpoint_auth_method": "client_secret_basic",
+            "scope": "admin",
+        })
+        creds = {"client_id": reg["client_id"], "client_secret": reg["client_secret"]}
+    tok = post("/token", {
+        "grant_type": "client_credentials",
+        "client_id": creds["client_id"],
+        "client_secret": creds["client_secret"],
+        "scope": "admin",
+    }, form=True)
+    print(json.dumps({"client_id": creds["client_id"],
+                      "client_secret": creds["client_secret"],
+                      "access_token": tok["access_token"]}))
+except Exception as exc:
+    print(json.dumps({"error": str(exc)}))
+'''
 
 
 def log(msg: str = "") -> None:
@@ -147,6 +227,7 @@ class Container:
     cpus: str = ""
     restart: str = ""
     start_fatal: bool = False
+    cmd: list[str] = field(default_factory=list)  # args appended after image
 
 
 def start_container(c: Container) -> bool:
@@ -172,6 +253,7 @@ def start_container(c: Container) -> bool:
     if c.restart:
         args += ["--restart", c.restart]
     args.append(c.image)
+    args += c.cmd
 
     log(f"Starting {c.name} ...")
     try:
@@ -253,15 +335,16 @@ def deep_merge_defaults(base: dict, defaults: dict) -> dict:
     return base
 
 
-def write_hermes_config() -> None:
+def write_hermes_config(gbrain_access: str) -> None:
     log("Restoring Hermes Z.AI config ...")
+    config_yaml = HERMES_CONFIG_YAML.format(gbrain_token=gbrain_access or "MISSING")
 
     if not _HAS_YAML:
         cmd = ["podman", "exec", "-i", "hermes-webui", "bash", "-c",
                "cat > /home/hermeswebui/.hermes/config.yaml"]
         for i in range(30):
             try:
-                run(cmd, input_text=HERMES_CONFIG_YAML, quiet=True)
+                run(cmd, input_text=config_yaml, quiet=True)
                 break
             except RuntimeError:
                 if i == 29:
@@ -289,8 +372,16 @@ def write_hermes_config() -> None:
             time.sleep(1)
 
     existing = yaml.safe_load(existing_raw) or {}
-    defaults = yaml.safe_load(HERMES_CONFIG_YAML) or {}
+    defaults = yaml.safe_load(config_yaml) or {}
     merged = deep_merge_defaults(existing, defaults)
+    # Force the gbrain MCP entry so a freshly-minted access token always wins
+    # (deep_merge only fills missing keys; it would keep a stale bearer).
+    if gbrain_access:
+        merged["mcp_servers"] = merged.get("mcp_servers") or {}
+        merged["mcp_servers"]["gbrain"] = {
+            "url": "http://localhost:8083/mcp",
+            "headers": {"Authorization": f"Bearer {gbrain_access}"},
+        }
     merged_yaml = yaml.safe_dump(merged, default_flow_style=False, sort_keys=False)
 
     cmd = ["podman", "exec", "-i", "hermes-webui", "bash", "-c",
@@ -311,12 +402,32 @@ def write_hermes_config() -> None:
                    timeout=60, interval=2))
 
 
+def download_models() -> None:
+    """Download GGUF model files for embedding/reranker if not present."""
+    models_dir = GBRAIN_DATA_DIR / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, url in [(EMBED_MODEL_FILE, EMBED_MODEL_URL),
+                      (RERANK_MODEL_FILE, RERANK_MODEL_URL)]:
+        dest = models_dir / name
+        if dest.exists():
+            log(f"  {name} already present")
+            continue
+        log(f"  Downloading {name} ...")
+        r = subprocess.run(
+            ["curl", "-L", "--progress-bar", "-o", str(dest), url],
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"failed to download {name}")
+
+
 def build_containers(cfg: dict[str, str]) -> dict[str, Container]:
     home = Path.home()
     ws = SCRIPT_DIR / "hermes-workspace"
     opencode_pw = cfg["OPENCODE_SERVER_PASSWORD"]
     zai = cfg["ZAI_API_KEY"]
     webui_pw = cfg["HERMES_WEBUI_PASSWORD"]
+    gbrain_token = cfg["GBRAIN_ADMIN_TOKEN"]
     uid, gid = os.getuid(), os.getgid()
 
     return {
@@ -340,29 +451,75 @@ def build_containers(cfg: dict[str, str]) -> dict[str, Container]:
             devices=["/dev/kfd", "/dev/dri"], group_add=["video"],
             security_opt=["label=disable"], memory="32g", restart="always",
         ),
+        # gbrain embedding server — CPU, Qwen3-Embedding-4B (2560d; HNSW caps at 4000).
+        "llama_embed": Container(
+            name="hermes-llama-embed",
+            image=LLAMA_IMAGE_CPU,
+            mounts=[f"{GBRAIN_DATA_DIR}/models:/models:Z"],
+            security_opt=["label=disable"],
+            memory="8g", cpus="16",
+            cmd=[
+                "--model", f"/models/{EMBED_MODEL_FILE}",
+                "--alias", "Qwen3-Embedding-4B",
+                "--embeddings",
+                "--host", "0.0.0.0",
+                "--port", "8084",
+                "--n-gpu-layers", "0",
+                "--threads", "16",
+            ],
+        ),
+        # gbrain reranker — GPU, Qwen3-Reranker-4B.
+        "llama_rerank": Container(
+            name="hermes-llama-rerank",
+            image=LLAMA_IMAGE_ROCM,
+            devices=["/dev/kfd", "/dev/dri"], group_add=["video"],
+            security_opt=["label=disable"],
+            mounts=[f"{GBRAIN_DATA_DIR}/models:/models:Z"],
+            memory="8g",
+            cmd=[
+                "llama-server",
+                "--model", f"/models/{RERANK_MODEL_FILE}",
+                "--alias", "Qwen3-Reranker-4B",
+                "--reranking",
+                "--host", "0.0.0.0",
+                "--port", "8085",
+                "--n-gpu-layers", "99",
+                "--threads", "4",
+            ],
+        ),
         "gbrain_pg": Container(
             name="hermes-gbrain-pg", image="docker.io/pgvector/pgvector:pg17",
             env={"POSTGRES_USER": "gbrain", "POSTGRES_DB": "gbrain"},
             secrets=["gbrain-pg-password,type=env,target=POSTGRES_PASSWORD"],
-            mounts=["/opt/gbrain-data/pg:/var/lib/postgresql/data:Z"],
+            mounts=[f"{GBRAIN_DATA_DIR}/pg:/var/lib/postgresql/data:Z"],
             memory="1g", cpus="1",
         ),
         "gbrain": Container(
             name="hermes-gbrain", image="localhost/gbrain:latest",
-            env={"DATABASE_HOST": "localhost", "DATABASE_PORT": "5432",
-                 "DATABASE_USER": "gbrain", "DATABASE_NAME": "gbrain",
-                 "GBRAIN_PORT": "8083", "GBRAIN_HOME": "/root/.gbrain",
-                 "GBRAIN_FTS_LANGUAGE": "english"},
-            secrets=["gbrain-pg-password,type=env,target=POSTGRES_PASSWORD",
-                     "gbrain-zhipu-key,type=env,target=ZHIPUAI_API_KEY"],
-            mounts=["/opt/gbrain-data/config:/root/.gbrain:Z",
-                    "/opt/gbrain-data/brain:/root/brain:Z"],
-            memory="2g", cpus="1",
+            env={
+                "DATABASE_HOST": "localhost", "DATABASE_PORT": "5432",
+                "DATABASE_USER": "gbrain", "DATABASE_NAME": "gbrain",
+                "GBRAIN_PORT": "8083", "GBRAIN_HOME": "/root",
+                "GBRAIN_FTS_LANGUAGE": "english",
+                "LLAMA_SERVER_BASE_URL": "http://localhost:8084/v1",
+                "LLAMA_SERVER_RERANKER_BASE_URL": "http://localhost:8085/v1",
+                "EMBED_ALIAS": "Qwen3-Embedding-4B",
+                "EMBED_DIMENSIONS": "2560",
+                "RERANK_ALIAS": "Qwen3-Reranker-4B",
+                "GBRAIN_EMBEDDING_MODEL": "llama-server:Qwen3-Embedding-4B",
+                "GBRAIN_EMBEDDING_DIMENSIONS": "2560",
+                "GBRAIN_ADMIN_BOOTSTRAP_TOKEN": gbrain_token,
+            },
+            secrets=["gbrain-pg-password,type=env,target=POSTGRES_PASSWORD"],
+            mounts=[f"{GBRAIN_DATA_DIR}/config:/root/.gbrain:Z",
+                    f"{GBRAIN_DATA_DIR}/brain:/root/brain:Z"],
+            memory="2g", cpus="2",
         ),
         "webui": Container(
             name="hermes-webui", image="localhost/hermes-webui:latest",
             env={
                 "HERMES_WEBUI_HOST": "0.0.0.0", "HERMES_WEBUI_PORT": "8787",
+                "UV_LINK_MODE": "copy",
                 "HERMES_WEBUI_STATE_DIR": "/home/hermeswebui/.hermes/webui",
                 "HERMES_WEBUI_AUTO_INSTALL": "1",
                 "HERMES_WEBUI_AGENT_DIR": "/usr/local/lib/hermes-agent",
@@ -387,7 +544,7 @@ def build_containers(cfg: dict[str, str]) -> dict[str, Container]:
         ),
         "searxng": Container(
             name="hermes-searxng", image="docker.io/searxng/searxng:latest",
-            mounts=[f"{SCRIPT_DIR}/web-tools/searxng/settings.yml:/etc/searxng/settings.yml:ro,Z"],
+            mounts=[f"{SCRIPT_DIR}/config/searxng/settings.yml:/etc/searxng/settings.yml:ro,Z"],
         ),
         "trafilatura": Container(
             name="hermes-trafilatura", image="localhost/hermes-trafilatura:latest",
@@ -421,6 +578,9 @@ def banner() -> None:
     log("SearXNG:     http://127.0.0.1:8888")
     log("Trafilatura: http://127.0.0.1:8100")
     log("Playwright:  http://127.0.0.1:8101")
+    log("gbrain MCP:  http://127.0.0.1:8083/mcp")
+    log("Embeddings:  http://127.0.0.1:8084/v1  (Qwen3-Embedding-4B, CPU, 2560d)")
+    log("Reranker:    http://127.0.0.1:8085/v1  (Qwen3-Reranker-4B, GPU)")
     log("Password:    (see .env)")
     log()
     r = run(["podman", "pod", "ps", "--filter", f"name={POD}"], quiet=True)
@@ -458,13 +618,42 @@ def check_secrets_whitespace() -> None:
         log('      printf \'%s\' "$VALUE" | podman secret create <name> -   # then recreate the container')
 
 
+def ensure_gbrain_mcp_token() -> str:
+    # Register a DCR client once (creds persist on the host) and mint a
+    # long-lived client_credentials access token for the gbrain MCP endpoint.
+    creds = ""
+    if GBRAIN_CLIENT_STATE.exists():
+        creds = GBRAIN_CLIENT_STATE.read_text().strip()
+
+    def mint(seed: str) -> dict:
+        r = run(["podman", "exec", "-i", "hermes-opencode", "python3", "-c", _GBRAIN_MINT_PY],
+                input_text=seed, quiet=True)
+        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+        return json.loads(lines[-1]) if lines else {"error": "no output"}
+
+    out = mint(creds)
+    if "access_token" not in out and creds:
+        out = mint("")  # stored client invalid (e.g. DB wiped) -> re-register
+    if "access_token" not in out:
+        raise RuntimeError(f"gbrain MCP token mint failed: {out.get('error')}")
+    GBRAIN_CLIENT_STATE.write_text(json.dumps(
+        {"client_id": out["client_id"], "client_secret": out["client_secret"]}))
+    return out["access_token"]
+
+
 def build_images() -> None:
     log('Building container images ...')
-    run(['podman', 'build', '-f', 'opencode.Containerfile', '-t', 'localhost/hermes-opencode:latest', str(SCRIPT_DIR)])
-    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'web-tools/trafilatura/Containerfile'), '-t', 'localhost/hermes-trafilatura:latest', str(SCRIPT_DIR / 'web-tools/trafilatura')])
-    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'web-tools/playwright/Containerfile'), '-t', 'localhost/hermes-playwright:latest', str(SCRIPT_DIR / 'web-tools/playwright')])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/opencode/Containerfile'), '-t', 'localhost/hermes-opencode:latest', str(SCRIPT_DIR)])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/trafilatura/Containerfile'), '-t', 'localhost/hermes-trafilatura:latest', str(SCRIPT_DIR)])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/playwright/Containerfile'), '-t', 'localhost/hermes-playwright:latest', str(SCRIPT_DIR)])
     run(['podman', 'pull', 'docker.io/searxng/searxng:latest'])
-    run(['podman', 'build', '-f', 'hermes.Containerfile', '-t', 'localhost/hermes-webui:latest', str(SCRIPT_DIR)])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/webui/Containerfile'), '-t', 'localhost/hermes-webui:latest', str(SCRIPT_DIR)])
+    # gbrain image
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/gbrain/Containerfile'),
+         '-t', 'localhost/gbrain:latest', str(SCRIPT_DIR)])
+    # llama.cpp images (CPU + GPU)
+    run(['podman', 'pull', LLAMA_IMAGE_CPU])
+    run(['podman', 'pull', LLAMA_IMAGE_GPU])
 
 
 def main() -> None:
@@ -472,7 +661,7 @@ def main() -> None:
         build_images()
 
     cfg = load_env(SCRIPT_DIR / ".env")
-    for key in ("OPENCODE_SERVER_PASSWORD", "HERMES_WEBUI_PASSWORD", "ZAI_API_KEY"):
+    for key in ("OPENCODE_SERVER_PASSWORD", "HERMES_WEBUI_PASSWORD", "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN"):
         if not cfg.get(key):
             log(f"ERROR: {key} must be set in .env")
             sys.exit(1)
@@ -482,6 +671,14 @@ def main() -> None:
     check_secrets_whitespace()
 
     (SCRIPT_DIR / "hermes-workspace").mkdir(exist_ok=True)
+
+    # Ensure gbrain data dirs exist.
+    for subdir in ("pg", "config", "brain", "models"):
+        (GBRAIN_DATA_DIR / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Download GGUF model files for embedding/reranker if not present.
+    log("Checking gbrain model files ...")
+    download_models()
 
     # --- cleanup + create pod ------------------------------------------------
     if run(["podman", "pod", "exists", POD], check=False, quiet=True).returncode == 0:
@@ -496,7 +693,9 @@ def main() -> None:
          "-p", "127.0.0.1:8888:8080",
          "-p", "127.0.0.1:8100:8000",
          "-p", "127.0.0.1:8101:8001",
-         "-p", "127.0.0.1:8181:8181"])
+         "-p", "127.0.0.1:8181:8181",
+         "-p", "127.0.0.1:8084:8084",
+         "-p", "127.0.0.1:8085:8085"])
 
     c = build_containers(cfg)
 
@@ -511,19 +710,51 @@ def main() -> None:
     # 2. sidecar — start early; the model loads in the background.
     start_container(c["sidecar"])
 
-    # 3. gbrain-pg -> gbrain (restart=no; gbrain needs postgres up first).
-    start_container(c["gbrain_pg"])
-    if wait_for(Probe(name="gbrain-pg", pg_ready="hermes-gbrain-pg",
-                      pg_user="gbrain", timeout=30)):
-        start_container(c["gbrain"])
-        wait_for(Probe(name="gbrain", http="http://127.0.0.1:8083/",
-                       via_container="hermes-opencode", timeout=30))
+    # 3. gbrain stack: embed server -> rerank server -> postgres -> gbrain
+    #    (restart=no for all; if a dependency fails, skip downstream).
+
+    # 3a. Embedding server (CPU, ~4.7GB model — slow to load).
+    start_container(c["llama_embed"])
+    embed_up = wait_for(Probe(
+        name="llama-embed", http="http://127.0.0.1:8084/health",
+        timeout=120, interval=3))
+
+    # 3b. Reranker server (GPU).
+    if embed_up:
+        start_container(c["llama_rerank"])
+        rerank_up = wait_for(Probe(
+            name="llama-rerank", http="http://127.0.0.1:8085/health",
+            timeout=120, interval=3))
     else:
-        log("WARN: skipping gbrain (postgres not ready)")
+        rerank_up = False
+        log("WARN: skipping reranker (embed server not up)")
+
+    # 3c. Postgres + pgvector.
+    start_container(c["gbrain_pg"])
+    pg_up = wait_for(Probe(name="gbrain-pg", pg_ready="hermes-gbrain-pg",
+                           pg_user="gbrain", timeout=30))
+
+    # 3d. gbrain MCP server.
+    gbrain_up = False
+    if pg_up and embed_up:
+        start_container(c["gbrain"])
+        gbrain_up = wait_for(Probe(name="gbrain", http="http://127.0.0.1:8083/",
+                                   via_container="hermes-opencode", timeout=120))
+    else:
+        log("WARN: skipping gbrain (postgres or embeddings not ready)")
+
+    # 3e. Mint a long-lived MCP access token for Hermes (needs gbrain up).
+    gbrain_access = ""
+    if gbrain_up:
+        try:
+            gbrain_access = ensure_gbrain_mcp_token()
+            log("gbrain MCP access token minted (client_credentials, 1y TTL)")
+        except RuntimeError as e:
+            log(f"WARN: {e} (Hermes will not have gbrain tools)")
 
     # 4. hermes-webui (needs opencode + gbrain) + config restore.
     start_container(c["webui"])
-    write_hermes_config()
+    write_hermes_config(gbrain_access)
 
     # 5. web-tools (non-fatal).
     start_container(c["searxng"])

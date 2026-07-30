@@ -1,0 +1,21 @@
+# Version control, caches, logs - never needed in a build context.
+.git
+.gitignore
+__pycache__/
+*.pyc
+build.log
+
+# Secrets - must never enter a build context (injected via podman secrets at runtime).
+.env
+.env.*
+
+# Runtime state - mounted as volumes, not baked into images.
+hermes-workspace/
+
+# The orchestrator runs on the host; it is not copied into any image.
+run.py
+
+# Database files (guard against any landing at the repo root).
+*.db
+*.sqlite
+*_dbos.sqlite
