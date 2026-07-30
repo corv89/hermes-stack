@@ -92,6 +92,8 @@ model:
 skills:
   external_dirs:
     - /opt/hermes-skills
+streaming:
+  enabled: true
 mcp_servers:
   gbrain:
     url: http://localhost:8083/mcp
