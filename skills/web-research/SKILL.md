@@ -28,6 +28,17 @@ same pod and are reachable on localhost. No external API keys are required.
 - You need the content of a specific URL (article, docs page, etc.).
 - A page is JS-heavy and a plain fetch returns nothing useful.
 
+## Use this, not the built-in web tools
+
+Hermes ships built-in `web_search` / `web_extract` / `browser_*` tools, but in
+this deployment extraction is not configured — `web_extract`/`browser` expect
+external Firecrawl/Browserbase services we don't run, so they fail or return
+nothing. Ignore any generic coaching to "use web_extract, not curl." For search
+and extraction here, always use the in-pod services below (`web_search` is the
+one exception — it's already wired to SearXNG, so built-in search and this skill
+agree). Reaching Trafilatura/Playwright by `curl` to the pod endpoints is the
+correct path, not a workaround.
+
 ## Flow
 
 1. **Search (find URLs)** — SearXNG. Hermes' native web-search provider already
