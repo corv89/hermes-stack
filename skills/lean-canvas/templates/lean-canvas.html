@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lean Canvas</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: #fff;
+    color: #1a1a1a;
+    padding: 24px;
+    min-height: 100vh;
+  }
+
+  .canvas {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 0;
+    border: 2px solid #1a1a1a;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .cell {
+    border: 1px solid #ccc;
+    padding: 12px 14px;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+
+  .cell h3 {
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+    color: #1a1a1a;
+  }
+
+  .fill-order {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 50%;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .cell .hint {
+    font-size: 10px;
+    color: #888;
+    line-height: 1.4;
+    margin-bottom: 8px;
+  }
+
+  .cell .content {
+    font-size: 12px;
+    line-height: 1.5;
+    flex: 1;
+    color: #333;
+  }
+
+  .cell .content p { margin-bottom: 4px; }
+
+  /* Row 1: Problem, Solution, UVP, Unfair Advantage, Customer Segments */
+  .problem        { grid-column: 1; grid-row: 1; }
+  .solution       { grid-column: 2; grid-row: 1; }
+  .uvp            { grid-column: 3; grid-row: 1 / span 2; }
+  .unfair         { grid-column: 4; grid-row: 1; }
+  .segments       { grid-column: 5; grid-row: 1; }
+
+  /* Row 2: Existing Alternatives, Key Metrics, (UVP spans), Channels, Early Adopters */
+  .alternatives   { grid-column: 1; grid-row: 2; }
+  .metrics        { grid-column: 2; grid-row: 2; }
+  /* UVP spans row 1-2 */
+  .channels       { grid-column: 4; grid-row: 2; }
+  .adopters       { grid-column: 5; grid-row: 2; }
+
+  /* Row 3: Cost Structure, Revenue Streams */
+  .cost           { grid-column: 1 / span 2; grid-row: 3; min-height: 100px; }
+  .revenue        { grid-column: 3 / span 3; grid-row: 3; min-height: 100px; }
+
+  .sequence {
+    max-width: 1200px;
+    margin: 16px auto 0;
+    font-size: 11px;
+    color: #666;
+    line-height: 1.6;
+  }
+
+  .sequence strong {
+    color: #1a1a1a;
+  }
+
+  .footer {
+    text-align: right;
+    margin-top: 8px;
+    font-size: 10px;
+    color: #999;
+    max-width: 1200px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  @media print {
+    body { padding: 0; }
+    .cell { min-height: 120px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="canvas">
+  <!-- Row 1 -->
+  <div class="cell problem">
+    <h3><span class="fill-order">1</span> Problem</h3>
+    <div class="hint">Top 3 problems your customer faces</div>
+    <div class="content">
+      <p>1. </p>
+      <p>2. </p>
+      <p>3. </p>
+    </div>
+  </div>
+
+  <div class="cell solution">
+    <h3><span class="fill-order">4</span> Solution</h3>
+    <div class="hint">Top 3 features for each problem</div>
+    <div class="content">
+      <p>1. </p>
+      <p>2. </p>
+      <p>3. </p>
+    </div>
+  </div>
+
+  <div class="cell uvp">
+    <h3><span class="fill-order">3</span> Unique Value Proposition</h3>
+    <div class="hint">Single, clear, compelling message that turns an unaware visitor into an interested prospect</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <div class="cell unfair">
+    <h3><span class="fill-order">9</span> Unfair Advantage</h3>
+    <div class="hint">Something that cannot be easily copied or bought</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <div class="cell segments">
+    <h3><span class="fill-order">2</span> Customer Segments</h3>
+    <div class="hint">Who are your target customers?</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <!-- Row 2 -->
+  <div class="cell alternatives">
+    <h3><span class="fill-order">10</span> Existing Alternatives</h3>
+    <div class="hint">How do these problems get solved today?</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <div class="cell metrics">
+    <h3><span class="fill-order">8</span> Key Metrics</h3>
+    <div class="hint">What numbers tell you if your business is working?</div>
+    <div class="content">
+      <p>1. </p>
+      <p>2. </p>
+      <p>3. </p>
+    </div>
+  </div>
+
+  <!-- UVP spans here -->
+
+  <div class="cell channels">
+    <h3><span class="fill-order">5</span> Channels</h3>
+    <div class="hint">How do you reach your customers?</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <div class="cell adopters">
+    <h3>Early Adopters</h3>
+    <div class="hint">Which customers understand your value first?</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <!-- Row 3 -->
+  <div class="cell cost">
+    <h3><span class="fill-order">7</span> Cost Structure</h3>
+    <div class="hint">What are your fixed and variable costs?</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+
+  <div class="cell revenue">
+    <h3><span class="fill-order">6</span> Revenue Streams</h3>
+    <div class="hint">How do you make money?</div>
+    <div class="content">
+      <p></p>
+    </div>
+  </div>
+</div>
+
+<div class="sequence">
+  <strong>Fill order:</strong> 1 Problem → 2 Customer Segments → 3 UVP → 4 Solution → 5 Channels → 6 Revenue → 7 Cost → 8 Key Metrics → 9 Unfair Advantage → 10 Existing Alternatives
+</div>
+
+<div class="footer">Lean Canvas — Based on Ash Maurya's adaptation of the Business Model Canvas</div>
+
+</body>
+</html>
