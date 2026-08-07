@@ -60,12 +60,13 @@ the WebUI image.
 | Web | `hermes-searxng` | `searxng/searxng` | 8888→8080 | meta-search |
 | Web | `hermes-trafilatura` | built: `images/trafilatura` | 8100→8000 | fast extraction |
 | Web | `hermes-playwright` | built: `images/playwright` | 8101→8001 | JS-rendered fallback |
-| Add-on | `sidecar` | `llamacpp-sidecar` * | 8090 (internal) | local 27B LLM (ROCm on R9700) |
+| Add-on | `sidecar` | built: `images/sidecar` | 8090 (internal) | local 27B LLM (ROCm on R9700) |
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | autonomous research pipeline |
 
-\* The `sidecar` and `sourcebot` images are **built in separate repos**
-(`llama.cpp` and `sourcebot` respectively) and are optional. `run.py` pulls /
-builds everything else.
+\* The `sourcebot` image is **built in its own repo** and is optional. The
+`sidecar` image builds from `images/sidecar/Containerfile` via
+`python3 run.py --build-sidecar` (pinned llama.cpp commit; heavy — run only
+when bumping llama.cpp or ROCm). `run.py` pulls / builds everything else.
 
 **Graceful degradation:** only `hermes-opencode` and `hermes-webui` are fatal.
 Every other container is warn-and-continue, and gbrain is skipped if Postgres or

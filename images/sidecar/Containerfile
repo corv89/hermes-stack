@@ -1,0 +1,100 @@
+# =========================================================================
+# llama.cpp Sidecar — ROCm build for AMD Radeon AI PRO R9700 (gfx1201)
+#
+# Self-contained: shallow-clones llama.cpp at a pinned commit inside the
+# builder stage and compiles it against ROCm. Adapted from
+# ~/Src/sourcebot/deploy/sidecar-Containerfile — the recipe that produced
+# the original image (llama.cpp commit 0cea362, built 2026-07-24).
+#
+# GPU:   AMD Radeon AI PRO R9700 (32GB VRAM, gfx1201/RDNA4)
+# Model: Qwen 3.6 27B MTP-UD Q4_K_XL (~17GB), MTP speculative decoding
+# ROCm:  7.2.1 (official rocm/dev-ubuntu-24.04:7.2.1-complete base)
+#
+# Build (hermes-pod repo root):
+#   python3 run.py --build-sidecar
+#   # or directly:
+#   podman build -t localhost/llamacpp-sidecar:latest \
+#     -f images/sidecar/Containerfile .
+# =========================================================================
+
+ARG ROCM_VERSION=7.2.1
+# llama.cpp revision to build — pinned for reproducibility; bump deliberately.
+ARG LLAMA_REV=0cea36222fe9bac5ebfc45716c9eef11f37046c4
+
+# --- Builder stage ---
+FROM docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete AS builder
+ARG LLAMA_REV
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    libssl-dev \
+    curl \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Shallow checkout of the pinned commit (GitHub allows fetching by SHA).
+RUN git init /app \
+    && git -C /app remote add origin https://github.com/ggml-org/llama.cpp.git \
+    && git -C /app fetch --depth 1 origin ${LLAMA_REV} \
+    && git -C /app checkout FETCH_HEAD
+
+# Build only for gfx1201 (R9700) — faster than a fat binary.
+ENV AMDGPU_TARGETS=gfx1201
+
+WORKDIR /app
+
+RUN HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+    cmake -S . -B build \
+        -DGGML_HIP=ON \
+        -DGGML_HIP_ROCWMMA_FATTN=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLAMA_CURL=OFF \
+        -DLLAMA_SERVER_SSL=OFF \
+        -DLLAMA_BUILD_TESTS=OFF \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+    && cmake --build build --config Release -j$(nproc) \
+        --target llama-server llama-cli
+
+# --- Runtime stage ---
+FROM docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HSA_ENABLE_SDMA=0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy all built artifacts (binaries + shared libs) from the build output.
+COPY --from=builder /app/build/bin /opt/llama.cpp/bin
+ENV LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/hip/lib:/opt/llama.cpp/bin
+ENV PATH=/opt/rocm/bin:/opt/llama.cpp/bin:$PATH
+
+RUN mkdir -p /models
+
+EXPOSE 8090
+
+ENV MODEL_PATH=/models/Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf
+ENV CTX_SIZE=16384
+ENV N_GPU_LAYERS=999
+ENV SPEC_DRAFT_N_MAX=4
+ENV HOST=0.0.0.0
+ENV PORT=8090
+
+CMD ["sh", "-c", "llama-server \
+  -m ${MODEL_PATH} \
+  --host ${HOST} \
+  --port ${PORT} \
+  -ngl ${N_GPU_LAYERS} \
+  -c ${CTX_SIZE} \
+  -t 4 \
+  --cont-batching \
+  --spec-type draft-mtp \
+  --spec-draft-n-max ${SPEC_DRAFT_N_MAX} \
+  --spec-draft-p-min 0.75 \
+  --metrics \
+  --props"]

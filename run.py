@@ -27,6 +27,10 @@ GPU layout (dual-GPU host):
   R9700   (gfx1201, 32GB) - sidecar 27B LLM via ROCm (pinned via
                             ROCR_VISIBLE_DEVICES: a ROCm runtime supports only
                             one GPU generation, so it must not see the Vega)
+
+Sidecar image: built from images/sidecar/Containerfile (pinned llama.cpp
+commit, ROCm 7.2.1, gfx1201) - rebuild with `python3 run.py --build-sidecar`.
+Kept out of the default build: heavy base + long compile, rarely needed.
 """
 from __future__ import annotations
 
@@ -76,7 +80,8 @@ LLAMA_IMAGE_CPU = "ghcr.io/ggml-org/llama.cpp:server"          # CPU fallback
 # mesa-vulkan-drivers, so the container only needs the Vega's render node.
 LLAMA_IMAGE_VULKAN = "ghcr.io/ggml-org/llama.cpp:server-vulkan"
 # gfx1201/RDNA4-capable build: the official :server-rocm image's ROCm is too
-# old to see the R9700, so the sidecar uses a custom image.
+# old to see the R9700, so the sidecar uses a custom image — recipe in
+# images/sidecar/Containerfile (rebuild: `run.py --build-sidecar`).
 LLAMA_IMAGE_ROCM = "localhost/llamacpp-sidecar:latest"
 
 # --- GPU topology (dual-GPU host) ---------------------------------------------
@@ -706,6 +711,18 @@ def ensure_gbrain_mcp_token() -> str:
     return out["access_token"]
 
 
+def build_sidecar_image() -> None:
+    """Rebuild the ROCm sidecar image from images/sidecar/Containerfile.
+
+    Opt-in (`--build-sidecar`) because it is heavy (large ROCm dev base, long
+    compile) and rarely needed — only when bumping the pinned llama.cpp commit
+    or the ROCm version.
+    """
+    log('Building sidecar image (ROCm 7.2.1 / gfx1201, pinned llama.cpp) ...')
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/sidecar/Containerfile'),
+         '-t', LLAMA_IMAGE_ROCM, str(SCRIPT_DIR)])
+
+
 def build_images() -> None:
     log('Building container images ...')
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/opencode/Containerfile'), '-t', 'localhost/hermes-opencode:latest', str(SCRIPT_DIR)])
@@ -722,6 +739,8 @@ def build_images() -> None:
 
 
 def main() -> None:
+    if '--build-sidecar' in sys.argv:
+        build_sidecar_image()
     if '--no-build' not in sys.argv:
         build_images()
 
