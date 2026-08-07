@@ -23,8 +23,8 @@ the core.
                         │   │ gbrain RAG memory                │     │
                         │   │  hermes-gbrain      MCP :8083    │     │
                         │   │  hermes-gbrain-pg   pgvector     │     │
-                        │   │  hermes-llama-embed :8084 (CPU)  │     │
-                        │   │  hermes-llama-rerank:8085 (GPU)  │     │
+                        │   │  hermes-llama-embed :8084 (Vega) │     │
+                        │   │  hermes-llama-rerank:8085 (Vega) │     │
                         │   └──────────────────────────────────┘     │
                         │   ┌──────────────────────────────────┐     │
                         │   │ web-tools (research + extract)   │     │
@@ -55,12 +55,12 @@ the WebUI image.
 | Core | `hermes-opencode` | built: `images/opencode` | 45650 (internal) | OpenCode v2 server; **fatal** |
 | Memory | `hermes-gbrain` | built: `images/gbrain` | 8083 (internal) | gbrain MCP (OAuth 2.1) |
 | Memory | `hermes-gbrain-pg` | `pgvector/pgvector:pg17` | 5432 (internal) | Postgres + pgvector |
-| Memory | `hermes-llama-embed` | `llama.cpp:server` | 8084 | Qwen3-Embedding-4B, CPU, 2560-d |
-| Memory | `hermes-llama-rerank` | `llamacpp-sidecar` | 8085 | Qwen3-Reranker-4B, GPU |
+| Memory | `hermes-llama-embed` | `llama.cpp:server-vulkan` | 8084 | Qwen3-Embedding-4B, Vulkan on Vega 56, 2560-d |
+| Memory | `hermes-llama-rerank` | `llama.cpp:server-vulkan` | 8085 | Qwen3-Reranker-4B, Vulkan on Vega 56 |
 | Web | `hermes-searxng` | `searxng/searxng` | 8888→8080 | meta-search |
 | Web | `hermes-trafilatura` | built: `images/trafilatura` | 8100→8000 | fast extraction |
 | Web | `hermes-playwright` | built: `images/playwright` | 8101→8001 | JS-rendered fallback |
-| Add-on | `sidecar` | `llamacpp-sidecar` * | 8090 (internal) | local 27B LLM |
+| Add-on | `sidecar` | `llamacpp-sidecar` * | 8090 (internal) | local 27B LLM (ROCm on R9700) |
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | autonomous research pipeline |
 
 \* The `sidecar` and `sourcebot` images are **built in separate repos**
@@ -94,8 +94,14 @@ All images build with the **repo root as the build context**
 - Linux x86_64 with rootless **Podman** (developed on Fedora, podman 5.x).
 - Python 3.10+ (stdlib only; `PyYAML` optional, used to *merge* rather than
   overwrite the Hermes config).
-- An **AMD ROCm GPU** for the reranker and sidecar (developed on gfx1201/RDNA4).
-  Without one, those two containers simply warn and the rest still runs.
+- GPUs — developed on a dual-AMD setup:
+  - **Vega 56 (gfx900)** — embeddings + reranker via the llama.cpp **Vulkan**
+    backend (`ghcr.io/ggml-org/llama.cpp:server-vulkan`). ROCm dropped gfx900,
+    but Vulkan (RADV) still supports it.
+  - **R9700 (gfx1201)** — the 27B sidecar via **ROCm**, pinned with
+    `ROCR_VISIBLE_DEVICES`: a ROCm runtime supports only one GPU generation,
+    and llama.cpp's HIP init fails when it also sees the Vega.
+  Without GPUs these containers warn and the rest of the stack still runs.
 - ~16 GB RAM minimum for the core; ~64 GB recommended with the full stack.
 - SELinux: handled via `:z`/`:Z` relabel flags and `--security-opt label=disable`
   where a container must read host model files.

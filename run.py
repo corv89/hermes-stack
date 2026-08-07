@@ -7,7 +7,7 @@ volumes (opencode-data, hermes-data) and bind mounts persist, so no data is lost
 
 Startup order (dependency-aware):
   opencode (fatal) -> sidecar (model loads in background)
-  -> llama-embed (CPU) -> llama-rerank (GPU) -> gbrain-pg -> gbrain
+  -> llama-embed + llama-rerank (Vulkan on Vega 56) -> gbrain-pg -> gbrain
   -> hermes-webui (+ config restore) -> searxng/trafilatura/playwright
   -> wait for sidecar -> sourcebot
 
@@ -17,10 +17,16 @@ never blocks the core opencode + webui stack. If the embed server or postgres is
 not ready, gbrain is skipped (both are restart=no and cannot self-heal).
 
 gbrain stack (fully local, no external API keys):
-  hermes-llama-embed   :8084  llama.cpp --embeddings (CPU, Qwen3-Embedding-4B, 2560d)
-  hermes-llama-rerank  :8085  llama.cpp --reranking  (GPU, Qwen3-Reranker-4B)
+  hermes-llama-embed   :8084  llama.cpp --embeddings (Vulkan on Vega 56, Qwen3-Embedding-4B, 2560d)
+  hermes-llama-rerank  :8085  llama.cpp --reranking  (Vulkan on Vega 56, Qwen3-Reranker-4B)
   hermes-gbrain-pg     :5432  Postgres 17 + pgvector
   hermes-gbrain        :8083  gbrain MCP HTTP server
+
+GPU layout (dual-GPU host):
+  Vega 56 (gfx900, 8GB)   - embed + rerank via the llama.cpp Vulkan backend
+  R9700   (gfx1201, 32GB) - sidecar 27B LLM via ROCm (pinned via
+                            ROCR_VISIBLE_DEVICES: a ROCm runtime supports only
+                            one GPU generation, so it must not see the Vega)
 """
 from __future__ import annotations
 
@@ -64,11 +70,53 @@ RERANK_MODEL_URL = (
     "Qwen.Qwen3-Reranker-4B.Q4_K_M.gguf"
 )
 
-LLAMA_IMAGE_CPU = "ghcr.io/ggml-org/llama.cpp:server"
-LLAMA_IMAGE_GPU = "ghcr.io/ggml-org/llama.cpp:server-rocm"
+LLAMA_IMAGE_CPU = "ghcr.io/ggml-org/llama.cpp:server"          # CPU fallback
+# Vulkan backend for the aux servers on the Vega 56 (gfx900): ROCm dropped
+# gfx900 support, but Vulkan (RADV) still handles it. The official image ships
+# mesa-vulkan-drivers, so the container only needs the Vega's render node.
+LLAMA_IMAGE_VULKAN = "ghcr.io/ggml-org/llama.cpp:server-vulkan"
 # gfx1201/RDNA4-capable build: the official :server-rocm image's ROCm is too
-# old to see this GPU, so the reranker reuses the same custom image as the sidecar.
+# old to see the R9700, so the sidecar uses a custom image.
 LLAMA_IMAGE_ROCM = "localhost/llamacpp-sidecar:latest"
+
+# --- GPU topology (dual-GPU host) ---------------------------------------------
+# PCI addresses of the two GPUs; render nodes are resolved via
+# /dev/dri/by-path (stable across reboots). The ROCm container is pinned to
+# the R9700's KFD agent index because a ROCm runtime supports only one GPU
+# generation and fails to initialize when it also sees the Vega's gfx900.
+GPU_PCI_VULKAN = "0000:06:00.0"   # Vega 56 (gfx900)
+GPU_PCI_ROCM = "0000:0e:00.0"     # R9700 (gfx1201)
+GPU_GFX_ROCM = 120001             # KFD gfx_target_version of the R9700
+
+
+def render_node(pci_addr: str) -> str:
+    """DRM render node for a GPU, resolved from its stable by-path symlink."""
+    link = Path(f"/dev/dri/by-path/pci-{pci_addr}-render")
+    if not link.exists():
+        raise RuntimeError(f"no render node for GPU {pci_addr} ({link} missing)")
+    return os.path.realpath(link)
+
+
+def rocm_agent_index(gfx_target: int) -> str:
+    """GPU agent index (for ROCR_VISIBLE_DEVICES) of a gfx target in the KFD
+    topology. The CPU node (gfx_target_version 0) is skipped."""
+    nodes = Path("/sys/class/kfd/kfd/topology/nodes")
+    idx = 0
+    for node in sorted(nodes.iterdir(), key=lambda n: int(n.name)):
+        props = node / "properties"
+        if not props.exists():
+            continue
+        gfx = 0
+        for line in props.read_text().splitlines():
+            if line.startswith("gfx_target_version"):
+                gfx = int(line.split()[1])
+                break
+        if gfx == 0:
+            continue
+        if gfx == gfx_target:
+            return str(idx)
+        idx += 1
+    raise RuntimeError(f"no KFD GPU agent with gfx_target_version {gfx_target}")
 
 # Env keys whose values must never appear in logs.
 SENSITIVE = {
@@ -432,6 +480,11 @@ def build_containers(cfg: dict[str, str]) -> dict[str, Container]:
     gbrain_token = cfg["GBRAIN_ADMIN_TOKEN"]
     uid, gid = os.getuid(), os.getgid()
 
+    # Resolve GPU devices (raises with a clear error if the host lacks them).
+    vega_render = render_node(GPU_PCI_VULKAN)
+    r9700_render = render_node(GPU_PCI_ROCM)
+    rocm_idx = rocm_agent_index(GPU_GFX_ROCM)
+
     return {
         "opencode": Container(
             name="hermes-opencode", image="localhost/hermes-opencode:latest",
@@ -448,38 +501,48 @@ def build_containers(cfg: dict[str, str]) -> dict[str, Container]:
         "sidecar": Container(
             name="sidecar", image="localhost/llamacpp-sidecar:latest",
             env={"MODEL_PATH": "/models/Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf",
-                 "CTX_SIZE": "16384"},
+                 "CTX_SIZE": "16384",
+                 # Pin ROCm to the R9700 agent. llama.cpp's HIP init aborts
+                 # when it also sees the Vega (no gfx900 kernels in the build);
+                 # ROCR_VISIBLE_DEVICES filters it out at the runtime level.
+                 # (HIP_VISIBLE_DEVICES must NOT be set too: after the ROCR
+                 # filter the R9700 is device 0, so a second filter by the
+                 # unfiltered index selects nothing.)
+                 "ROCR_VISIBLE_DEVICES": rocm_idx},
             mounts=[f"{home}/models:/models:ro"],
+            # Full /dev/dri is required: the ROCm runtime fails agent/node
+            # mapping when only the R9700 render node is passed (verified).
             devices=["/dev/kfd", "/dev/dri"], group_add=["video"],
             security_opt=["label=disable"], memory="32g", restart="always",
         ),
-        # gbrain embedding server — CPU, Qwen3-Embedding-4B (2560d; HNSW caps at 4000).
+        # gbrain embedding server — Vulkan on Vega 56, Qwen3-Embedding-4B
+        # (2560d; HNSW caps at 4000).
         "llama_embed": Container(
             name="hermes-llama-embed",
-            image=LLAMA_IMAGE_CPU,
+            image=LLAMA_IMAGE_VULKAN,
+            devices=[vega_render],
             mounts=[f"{GBRAIN_DATA_DIR}/models:/models:Z"],
             security_opt=["label=disable"],
-            memory="8g", cpus="16",
+            memory="8g",
             cmd=[
                 "--model", f"/models/{EMBED_MODEL_FILE}",
                 "--alias", "Qwen3-Embedding-4B",
                 "--embeddings",
                 "--host", "0.0.0.0",
                 "--port", "8084",
-                "--n-gpu-layers", "0",
-                "--threads", "16",
+                "--n-gpu-layers", "99",
+                "--threads", "4",
             ],
         ),
-        # gbrain reranker — GPU, Qwen3-Reranker-4B.
+        # gbrain reranker — Vulkan on Vega 56, Qwen3-Reranker-4B.
         "llama_rerank": Container(
             name="hermes-llama-rerank",
-            image=LLAMA_IMAGE_ROCM,
-            devices=["/dev/kfd", "/dev/dri"], group_add=["video"],
+            image=LLAMA_IMAGE_VULKAN,
+            devices=[vega_render],
             security_opt=["label=disable"],
             mounts=[f"{GBRAIN_DATA_DIR}/models:/models:Z"],
             memory="8g",
             cmd=[
-                "llama-server",
                 "--model", f"/models/{RERANK_MODEL_FILE}",
                 "--alias", "Qwen3-Reranker-4B",
                 "--reranking",
@@ -581,8 +644,8 @@ def banner() -> None:
     log("Trafilatura: http://127.0.0.1:8100")
     log("Playwright:  http://127.0.0.1:8101")
     log("gbrain MCP:  http://127.0.0.1:8083/mcp")
-    log("Embeddings:  http://127.0.0.1:8084/v1  (Qwen3-Embedding-4B, CPU, 2560d)")
-    log("Reranker:    http://127.0.0.1:8085/v1  (Qwen3-Reranker-4B, GPU)")
+    log("Embeddings:  http://127.0.0.1:8084/v1  (Qwen3-Embedding-4B, Vulkan/Vega 56, 2560d)")
+    log("Reranker:    http://127.0.0.1:8085/v1  (Qwen3-Reranker-4B, Vulkan/Vega 56)")
     log("Password:    (see .env)")
     log()
     r = run(["podman", "pod", "ps", "--filter", f"name={POD}"], quiet=True)
@@ -653,9 +716,9 @@ def build_images() -> None:
     # gbrain image
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/gbrain/Containerfile'),
          '-t', 'localhost/gbrain:latest', str(SCRIPT_DIR)])
-    # llama.cpp images (CPU + GPU)
+    # llama.cpp images (Vulkan for the aux servers; CPU as fallback)
     run(['podman', 'pull', LLAMA_IMAGE_CPU])
-    run(['podman', 'pull', LLAMA_IMAGE_GPU])
+    run(['podman', 'pull', LLAMA_IMAGE_VULKAN])
 
 
 def main() -> None:
@@ -715,13 +778,13 @@ def main() -> None:
     # 3. gbrain stack: embed server -> rerank server -> postgres -> gbrain
     #    (restart=no for all; if a dependency fails, skip downstream).
 
-    # 3a. Embedding server (CPU, ~4.7GB model — slow to load).
+    # 3a. Embedding server (Vulkan on Vega 56).
     start_container(c["llama_embed"])
     embed_up = wait_for(Probe(
         name="llama-embed", http="http://127.0.0.1:8084/health",
         timeout=120, interval=3))
 
-    # 3b. Reranker server (GPU).
+    # 3b. Reranker server (Vulkan on Vega 56).
     if embed_up:
         start_container(c["llama_rerank"])
         rerank_up = wait_for(Probe(
