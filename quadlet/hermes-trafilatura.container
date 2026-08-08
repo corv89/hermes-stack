@@ -1,0 +1,14 @@
+[Unit]
+Description=Trafilatura web text extraction (web tools)
+
+[Container]
+ContainerName=hermes-trafilatura
+Image=localhost/hermes-trafilatura:latest
+Network=hermesnet.network
+PublishPort=127.0.0.1:8100:8000
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

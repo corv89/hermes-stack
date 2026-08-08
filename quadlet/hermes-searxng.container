@@ -1,0 +1,15 @@
+[Unit]
+Description=SearXNG metasearch (web tools)
+
+[Container]
+ContainerName=hermes-searxng
+Image=docker.io/searxng/searxng:latest
+Network=hermesnet.network
+Volume={{REPO}}/config/searxng/settings.yml:/etc/searxng/settings.yml:ro,Z
+PublishPort=127.0.0.1:8888:8080
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

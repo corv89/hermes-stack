@@ -1,0 +1,15 @@
+[Unit]
+Description=Playwright browser service (web tools)
+
+[Container]
+ContainerName=hermes-playwright
+Image=localhost/hermes-playwright:latest
+Network=hermesnet.network
+AddCapability=CAP_SYS_ADMIN
+PublishPort=127.0.0.1:8101:8001
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

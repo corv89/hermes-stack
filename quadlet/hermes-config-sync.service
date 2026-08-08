@@ -1,0 +1,13 @@
+[Unit]
+Description=Hermes config sync (gbrain MCP token + config.yaml deep-merge)
+After=hermes-gbrain.service hermes-gbrain-pg.service
+Wants=hermes-gbrain.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 {{REPO}}/run.py --config-sync
+TimeoutStartSec=300
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

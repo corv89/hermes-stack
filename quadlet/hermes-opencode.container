@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenCode server (driven by the Hermes agent)
+
+[Container]
+ContainerName=hermes-opencode
+Image=localhost/hermes-opencode:latest
+Network=hermesnet.network
+Environment=OPENCODE_PASSWORD={{OPENCODE_PASSWORD}}
+Volume={{HOME}}/.config/opencode:/root/.config/opencode:ro,Z
+Volume=opencode-data:/root/.local/share/opencode
+Volume={{PROJECT_MOUNT}}:/work:rw,z
+Volume={{REPO}}/hermes-workspace:/workspace:ro,z
+PublishPort=127.0.0.1:45650:45650
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

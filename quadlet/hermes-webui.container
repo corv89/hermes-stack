@@ -1,0 +1,50 @@
+[Unit]
+Description=Hermes WebUI + agent + messaging gateway
+Wants=hermes-config-sync.service
+After=hermes-config-sync.service
+
+[Container]
+ContainerName=hermes-webui
+Image=localhost/hermes-webui:latest
+Network=hermesnet.network
+# keep-id: container uid 1000 = the host user, so everything the agent
+# writes into the hermes-data volume is natively host-owned (the bindfs
+# shim is retired). The image entrypoint detects the non-root start,
+# verifies WANTED_UID/GID match, seeds /app and runs the server directly.
+UserNS=keep-id:uid=1000,gid=1000
+User=1000:1000
+Environment=HOME=/home/hermeswebui
+Environment=WANTED_UID=1000
+Environment=WANTED_GID=1000
+Environment=HERMES_WEBUI_HOST=0.0.0.0
+Environment=HERMES_WEBUI_PORT=8787
+Environment=UV_LINK_MODE=copy
+Environment=HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+Environment=HERMES_WEBUI_AUTO_INSTALL=1
+Environment=HERMES_WEBUI_AGENT_DIR=/usr/local/lib/hermes-agent
+Environment=HERMES_WEBUI_PASSWORD={{HERMES_WEBUI_PASSWORD}}
+Environment=OPENCODE_SERVER_URL=http://hermes-opencode:45650
+Environment=OPENCODE_SERVER_USER=opencode
+Environment=OPENCODE_SERVER_PASS={{OPENCODE_PASSWORD}}
+Environment=OPENCODE_SERVER_PASSWORD={{OPENCODE_PASSWORD}}
+Environment=OPENCODE_PASSWORD={{OPENCODE_PASSWORD}}
+Environment=GLM_API_KEY={{ZAI_API_KEY}}
+Environment=ZAI_API_KEY={{ZAI_API_KEY}}
+Environment=SEARXNG_URL=http://hermes-searxng:8080
+Environment=TRAFILATURA_URL=http://hermes-trafilatura:8000
+Environment=PLAYWRIGHT_URL=http://hermes-playwright:8001
+Volume=hermes-data:/home/hermeswebui/.hermes
+# keep-id cannot chown the image-owned /home/hermeswebui; give the agent's
+# dot-dirs their own volumes so uid 1000 can create/write them.
+Volume=hermes-webui-local:/home/hermeswebui/.local
+Volume=hermes-webui-cache:/home/hermeswebui/.cache
+Volume={{PROJECT_MOUNT}}:/work:ro,z
+Volume={{REPO}}/hermes-workspace:/workspace:rw,z
+PublishPort=127.0.0.1:8787:8787
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

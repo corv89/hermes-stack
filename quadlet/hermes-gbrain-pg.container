@@ -1,0 +1,24 @@
+[Unit]
+Description=Postgres 17 + pgvector (gbrain)
+
+[Container]
+ContainerName=hermes-gbrain-pg
+Image=docker.io/pgvector/pgvector:pg17
+Network=hermesnet.network
+Environment=POSTGRES_USER=gbrain
+Environment=POSTGRES_DB=gbrain
+# The gbrain entrypoint deliberately redacts the password (***): in the pod
+# era gbrain connected over localhost, which the postgres image ships as
+# trust. Keep that trust boundary for hermesnet peers (5432 is not
+# host-published); scram would reject the redacted password.
+Environment=POSTGRES_HOST_AUTH_METHOD=trust
+Secret=gbrain-pg-password,type=env,target=POSTGRES_PASSWORD
+Volume={{GBRAIN_DATA_DIR}}/pg:/var/lib/postgresql/data:Z
+Memory=1g
+PodmanArgs=--cpus=1
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

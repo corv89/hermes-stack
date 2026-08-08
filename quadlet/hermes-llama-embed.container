@@ -1,0 +1,19 @@
+[Unit]
+Description=llama.cpp embeddings - Qwen3-Embedding-4B (Vulkan on Vega 56)
+
+[Container]
+ContainerName=hermes-llama-embed
+Image=ghcr.io/ggml-org/llama.cpp:server-vulkan
+Network=hermesnet.network
+AddDevice={{VEGA_RENDER}}
+Volume={{GBRAIN_DATA_DIR}}/models:/models:Z
+SecurityLabelDisable=true
+Memory=8g
+PublishPort=127.0.0.1:8084:8084
+Exec=--model /models/{{EMBED_MODEL_FILE}} --alias Qwen3-Embedding-4B --embeddings --host 0.0.0.0 --port 8084 --n-gpu-layers 99 --threads 4
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

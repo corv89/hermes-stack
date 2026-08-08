@@ -89,4 +89,4 @@ echo "[gbrain] Migrations complete."
 # ── Step 4: Start the MCP HTTP server ──────────────────────────────────────
 
 echo "[gbrain] Starting MCP HTTP server on port ${GBRAIN_PORT}..."
-exec gbrain serve --http --port "$GBRAIN_PORT" --host 0.0.0.0 --enable-dcr-insecure --token-ttl 31536000
+exec gbrain serve --http --port "$GBRAIN_PORT" --host hermes-gbrain --bind 0.0.0.0 --enable-dcr-insecure --token-ttl 31536000

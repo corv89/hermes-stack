@@ -1,0 +1,30 @@
+[Unit]
+Description=llama.cpp sidecar - Qwen3.6-27B MTP (ROCm on R9700)
+
+[Container]
+ContainerName=hermes-sidecar
+Image=localhost/llamacpp-sidecar:latest
+Network=hermesnet.network
+Environment=MODEL_PATH=/models/Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf
+Environment=CTX_SIZE=16384
+# Pin ROCm to the R9700 agent: a ROCm runtime supports only one GPU
+# generation and llama.cpp HIP init aborts if it also sees the Vega.
+# (HIP_VISIBLE_DEVICES must NOT be set too - after the ROCR filter the
+# R9700 is device 0, so a second filter selects nothing.)
+Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX}}
+Volume={{HOME}}/models:/models:ro
+# Full /dev/dri is required: the ROCm runtime fails agent/node mapping
+# when only the R9700 render node is passed (verified).
+AddDevice=/dev/kfd
+AddDevice=/dev/dri
+GroupAdd=video
+SecurityLabelDisable=true
+Memory=32g
+PublishPort=127.0.0.1:8090:8090
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

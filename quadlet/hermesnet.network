@@ -1,0 +1,6 @@
+# Rendered/installed by run.py (no placeholders here).
+# Private bridge network for the Hermes stack; container names resolve
+# via aardvark-dns (hermes-opencode, hermes-gbrain, hermes-sidecar, ...).
+[Network]
+NetworkName=hermesnet
+Driver=bridge

@@ -141,7 +141,7 @@ picker Ctrl+X M, command palette, selectors) do not render through the PTY bridg
 Use it only to attach for debugging:
 
 ```
-terminal(command="opencode2 --server http://127.0.0.1:45650", workdir="/work", background=true, pty=true)
+terminal(command="opencode2 --server http://hermes-opencode:45650", workdir="/work", background=true, pty=true)
 # exit with Ctrl+C: process(action="write", session_id="<id>", data="\x03")
 ```
 

@@ -114,4 +114,12 @@ COPY --chmod=755 bin/oc /usr/local/bin/oc
 # Ctrl+X M model picker does not render through the PTY bridge).
 COPY --chmod=755 bin/ocm /usr/local/bin/ocm
 
+# Rootless (keep-id) startup: the init's /app seed uses `cp -a`, which fails
+# preserving attributes on the root-owned /app dir itself ("Operation not
+# permitted") when running unprivileged even though the content copy succeeds.
+# Use cp -r (preserves modes, not ownership/timestamps) for the rootless seed.
+RUN grep -q 'cp -a /apptoo/. /app/' /hermeswebui_init.bash \
+    && sed -i 's|cp -a /apptoo/\. /app/|cp -r /apptoo/. /app/|' /hermeswebui_init.bash \
+    && grep -q 'cp -r /apptoo/. /app/' /hermeswebui_init.bash
+
 CMD ["/hermeswebui_init.bash"]
