@@ -79,11 +79,25 @@ RUN mkdir -p /models
 EXPOSE 8090
 
 ENV MODEL_PATH=/models/Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf
-ENV CTX_SIZE=16384
+# Unified KV pool shared by all slots (kv_unified): 64K total cells. Hermes
+# refuses models with <64K context, and the model's trained window is 256K,
+# so 64K is honest headroom, not an exaggeration.
+ENV CTX_SIZE=65536
+# Quantized KV cache: f16 KV for a 64K pool would need ~13-17GB VRAM on top
+# of the ~18GB weights; q8_0 roughly halves that at negligible quality cost.
+ENV CACHE_TYPE_K=q8_0
+ENV CACHE_TYPE_V=q8_0
 ENV N_GPU_LAYERS=999
 ENV SPEC_DRAFT_N_MAX=4
 ENV HOST=0.0.0.0
 ENV PORT=8090
+# Clean model id for OpenAI-compatible clients (else the raw GGUF path is
+# served). Hermes references the model by this name (see run.py config).
+ENV MODEL_ALIAS=qwen3.6-27b
+# Thinking-model handling: auto = detect <think> tags and route them to
+# reasoning_content (Thinking ON). Set REASONING_FORMAT=none to disable
+# thinking and send all tokens to content (faster, weaker reasoning).
+ENV REASONING_FORMAT=auto
 
 CMD ["sh", "-c", "llama-server \
   -m ${MODEL_PATH} \
@@ -96,5 +110,9 @@ CMD ["sh", "-c", "llama-server \
   --spec-type draft-mtp \
   --spec-draft-n-max ${SPEC_DRAFT_N_MAX} \
   --spec-draft-p-min 0.75 \
+  --alias ${MODEL_ALIAS} \
+  --reasoning-format ${REASONING_FORMAT} \
+  --cache-type-k ${CACHE_TYPE_K} \
+  --cache-type-v ${CACHE_TYPE_V} \
   --metrics \
   --props"]

@@ -36,8 +36,8 @@ container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
                     │   │  hermes-playwright   :8001           │     │
                     │   └──────────────────────────────────────┘     │
                     │   ┌──────────────────────────────────────┐     │
-                    │   │ add-ons (images built elsewhere)     │     │
-                    │   │  hermes-sidecar  local 27B LLM :8090 │     │
+                    │   │ add-ons                              │     │
+                    │   │  hermes-sidecar  primary LLM   :8090 │     │
                     │   │  sourcebot       research bot  :8181 │     │
                     │   └──────────────────────────────────────┘     │
                     └────────────────────────────────────────────────┘
@@ -49,6 +49,34 @@ wrappers), queries long-term memory through the gbrain MCP server, and
 researches the web through SearXNG → Trafilatura → Playwright. The two skills
 under [`skills/`](skills/) (`opencode-driver`, `web-research`) teach Hermes
 these flows and are baked into the WebUI image.
+
+## Model topology — local-first, cloud escalation
+
+Hermes runs its agent loop on the **on-box sidecar by default** and keeps a
+cloud provider wired as the escalation path. The wiring lives in
+`HERMES_CONFIG_YAML` in `run.py` (deep-merged into `config.yaml` by
+`--config-sync`):
+
+- **Primary** — `model.provider: custom:sidecar`, a named custom provider
+  pointing at `http://hermes-sidecar:8090/v1`. Default model `qwen3.6-27b`
+  (the sidecar's `--alias`), `context_length: 65536`.
+- **Failover** — `fallback_providers` lists the cloud `zai` / `glm-5-turbo`
+  endpoint. When the primary errors (sidecar down, overloaded, rate-limit,
+  connection), Hermes walks the chain automatically; `agent.api_max_retries: 1`
+  makes failover fast. This also covers the sidecar's cold start while the 27B
+  weights are still loading.
+- **Manual escalation** — at runtime via the gateway slash command
+  `/model glm-5-turbo --provider zai` (append `--once` for a single hard
+  turn), back with `/model qwen3.6-27b --provider custom:sidecar`.
+
+Two sidecar settings exist because of the 64K gate: Hermes refuses any model
+whose context window is below 64K (`MINIMUM_CONTEXT_LENGTH` in `agent_init`),
+so the sidecar runs `CTX_SIZE=65536` (a unified KV pool shared by all slots)
+with `q8_0` KV quantization (`--cache-type-k/-v`) to keep that pool inside the
+R9700's VRAM beside the ~18GB weights. `context_length` in the config must
+match the real server pool. Thinking is ON by default (`REASONING_FORMAT=auto`
+routes `<think>` blocks to `reasoning_content`); set `REASONING_FORMAT=none` in
+the sidecar unit for faster, reasoning-free replies.
 
 ## Layers & containers
 
@@ -63,7 +91,7 @@ these flows and are baked into the WebUI image.
 | Web | `hermes-searxng` | `searxng/searxng` | 8888→8080 | meta-search |
 | Web | `hermes-trafilatura` | built: `images/trafilatura` | 8100→8000 | fast extraction |
 | Web | `hermes-playwright` | built: `images/playwright` | 8101→8001 | JS-rendered fallback |
-| Add-on | `hermes-sidecar` | built: `images/sidecar` | 8090 | local 27B LLM (ROCm on R9700) |
+| Add-on | `hermes-sidecar` | built: `images/sidecar` | 8090 | local 27B LLM — Hermes' **primary** model (ROCm on R9700) |
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | autonomous research pipeline |
 
 \* The `sourcebot` image is **built in its own repo** and is optional. The

@@ -6,7 +6,13 @@ ContainerName=hermes-sidecar
 Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
 Environment=MODEL_PATH=/models/Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf
-Environment=CTX_SIZE=16384
+# Unified KV pool shared by all slots: 64K total cells. Hermes rejects models
+# with <64K context (agent_init MINIMUM_CONTEXT_LENGTH), and the trained
+# window is 256K, so this is real capacity. q8_0 KV quantization keeps the
+# 64K pool within the R9700's VRAM alongside the ~18GB weights.
+Environment=CTX_SIZE=65536
+Environment=CACHE_TYPE_K=q8_0
+Environment=CACHE_TYPE_V=q8_0
 # Pin ROCm to the R9700 agent: a ROCm runtime supports only one GPU
 # generation and llama.cpp HIP init aborts if it also sees the Vega.
 # (HIP_VISIBLE_DEVICES must NOT be set too - after the ROCR filter the

@@ -147,11 +147,39 @@ SENSITIVE = {
 
 # Deep-merged into the Hermes config.yaml on the hermes-data volume (the
 # {gbrain_token} placeholder is replaced with a freshly minted MCP token).
+#
+# Model topology — LOCAL-FIRST with cloud escalation:
+#   * Primary is the on-box ROCm sidecar (Qwen3.6-27B on the R9700), exposed
+#     as an OpenAI-compatible endpoint and registered as a named custom
+#     provider `sidecar`. model.provider: custom:sidecar selects it.
+#   * fallback_providers is Hermes' ordered failover chain, tried when the
+#     primary errors (rate-limit / overload / connection). The cloud zai/GLM
+#     endpoint stays wired as the escalation target so an outage, a cold
+#     sidecar (model still loading), or a 429 transparently escalates to
+#     cloud compute. api_max_retries is lowered for fast failover.
+#   * Manual escalation is also available at runtime via the gateway
+#     `/model <name> --provider zai` slash command.
+# NOTE: this template is run through str.format(), so it must not contain
+# literal '{' or '}' (YAML block style below avoids flow-mapping braces).
 HERMES_CONFIG_YAML = """\
+providers:
+  sidecar:
+    base_url: http://hermes-sidecar:8090/v1
 model:
-  provider: zai
-  default: glm-5-turbo
-  base_url: https://api.z.ai/api/coding/paas/v4
+  provider: custom:sidecar
+  default: qwen3.6-27b
+  # Explicit (matches providers.sidecar): deep-merge never deletes keys, so
+  # this clobbers the stale cloud base_url left over from the zai-primary era.
+  base_url: http://hermes-sidecar:8090/v1
+  # Must match the sidecar's unified KV pool (CTX_SIZE) and clear Hermes'
+  # 64K minimum-context gate (agent_init MINIMUM_CONTEXT_LENGTH).
+  context_length: 65536
+agent:
+  api_max_retries: 1
+fallback_providers:
+  - provider: zai
+    model: glm-5-turbo
+    base_url: https://api.z.ai/api/coding/paas/v4
 skills:
   external_dirs:
     - /opt/hermes-skills
