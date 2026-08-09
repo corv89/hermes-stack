@@ -85,6 +85,11 @@ RERANK_MODEL_URL = (
     "https://huggingface.co/DevQuasar/Qwen.Qwen3-Reranker-4B-GGUF/resolve/main/"
     "Qwen.Qwen3-Reranker-4B.Q4_K_M.gguf"
 )
+WHISPER_MODEL_FILE = "ggml-large-v3.bin"
+WHISPER_MODEL_URL = (
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+    "ggml-large-v3.bin"
+)
 
 LLAMA_IMAGE_CPU = "ghcr.io/ggml-org/llama.cpp:server"          # CPU fallback
 # Vulkan backend for the aux servers on the Vega 56 (gfx900): ROCm dropped
@@ -318,6 +323,7 @@ CONTAINER_UNITS = [
     "hermes-sidecar",
     "hermes-llama-embed",
     "hermes-llama-rerank",
+    "hermes-whisper",
     "hermes-gbrain-pg",
     "hermes-gbrain",
     "hermes-searxng",
@@ -336,6 +342,7 @@ GATES = [
     ("hermes-sidecar",    "http://127.0.0.1:8090/health",                  SIDECAR_READY_TIMEOUT, True, False),
     ("hermes-llama-embed",  "http://127.0.0.1:8084/health",                120, False, False),
     ("hermes-llama-rerank", "http://127.0.0.1:8085/health",                120, False, False),
+    ("hermes-whisper", "http://127.0.0.1:8086/health", 120, False, False),
     ("hermes-gbrain-pg",  "pg",                                            30,  False, False),
     ("hermes-gbrain",     "http://127.0.0.1:8083/",                        120, False, False),
     ("hermes-searxng",    "http://127.0.0.1:8888/search?q=test&format=json", 60, False, False),
@@ -411,6 +418,7 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "ROCR_INDEX": rocm_agent_index(GPU_GFX_ROCM),
         "EMBED_MODEL_FILE": EMBED_MODEL_FILE,
         "RERANK_MODEL_FILE": RERANK_MODEL_FILE,
+        "WHISPER_MODEL_FILE": WHISPER_MODEL_FILE,
         "OPENCODE_PASSWORD": cfg["OPENCODE_SERVER_PASSWORD"],
         "HERMES_WEBUI_PASSWORD": cfg["HERMES_WEBUI_PASSWORD"],
         "ZAI_API_KEY": cfg["ZAI_API_KEY"],
@@ -620,7 +628,8 @@ def download_models() -> None:
     models_dir = GBRAIN_DATA_DIR / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     for name, url in [(EMBED_MODEL_FILE, EMBED_MODEL_URL),
-                      (RERANK_MODEL_FILE, RERANK_MODEL_URL)]:
+                      (RERANK_MODEL_FILE, RERANK_MODEL_URL),
+                      (WHISPER_MODEL_FILE, WHISPER_MODEL_URL)]:
         dest = models_dir / name
         if dest.exists():
             continue
@@ -642,6 +651,7 @@ def build_images() -> None:
          '-t', 'localhost/gbrain:latest', str(SCRIPT_DIR)])
     run(['podman', 'pull', LLAMA_IMAGE_CPU])
     run(['podman', 'pull', LLAMA_IMAGE_VULKAN])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/whisper/Containerfile'), '-t', 'localhost/whisper-cpp-vulkan:latest', str(SCRIPT_DIR)])
 
 
 def build_sidecar_image() -> None:

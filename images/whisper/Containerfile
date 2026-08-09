@@ -1,0 +1,79 @@
+# =========================================================================
+# whisper.cpp — Vulkan build for AMD GPU (gfx900 Vega 56 / gfx1201 RDNA4)
+#
+# The official ghcr.io/ggml-org/whisper.cpp images ship CPU (:main) and CUDA
+# (:main-cuda) variants only. This custom build adds Vulkan (GGML_VULKAN=ON)
+# for AMD GPU support. Vulkan uses Mesa RADV — independent of ROCm, works on
+# any amdgpu device.
+#
+# Build:
+#   podman build -t localhost/whisper-cpp-vulkan:latest \
+#     -f images/whisper/Containerfile .
+# =========================================================================
+
+ARG UBUNTU_VERSION=24.04
+# whisper.cpp release tag — bump deliberately.
+# Check https://github.com/ggml-org/whisper.cpp/releases for latest.
+ARG WHISPER_REV=v1.9.2
+
+# --- Builder stage ---
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS builder
+ARG WHISPER_REV
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    git \
+    glslc \
+    glslang-tools \
+    spirv-headers \
+    curl \
+    libgomp1 \
+    libvulkan-dev \
+    mesa-vulkan-drivers \
+    vulkan-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Shallow checkout of the pinned tag/commit (GitHub allows fetching by tag).
+RUN git init /app \
+    && git -C /app remote add origin https://github.com/ggml-org/whisper.cpp.git \
+    && git -C /app fetch --depth 1 origin ${WHISPER_REV} \
+    && git -C /app checkout FETCH_HEAD
+
+WORKDIR /app
+
+# Build whisper-server with Vulkan backend.
+# GGML_VULKAN=ON enables the Vulkan compute backend (Mesa RADV on AMD).
+# This is independent of ROCm — no HIP, no version conflict with the R9700.
+RUN cmake -S . -B build \
+        -DGGML_VULKAN=ON \
+        -DWHISPER_BUILD_SERVER=ON \
+        -DWHISPER_BUILD_TESTS=OFF \
+        -DWHISPER_BUILD_EXAMPLES=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release -j$(nproc) \
+        --target whisper-server
+
+# --- Runtime stage ---
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    mesa-vulkan-drivers \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy all build artifacts (binaries + shared libs).
+COPY --from=builder /app/build/bin /opt/whisper.cpp/bin
+ENV PATH=/opt/whisper.cpp/bin:$PATH
+
+RUN mkdir -p /models
+EXPOSE 8086
+
+# Default: load large-v3 model. Override via CMD in quadlet if needed.
+ENTRYPOINT ["whisper-server"]

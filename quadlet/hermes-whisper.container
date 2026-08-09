@@ -1,0 +1,19 @@
+[Unit]
+Description=whisper.cpp STT - ggml-large-v3 (Vulkan on aux GPU)
+
+[Container]
+ContainerName=hermes-whisper
+Image=localhost/whisper-cpp-vulkan:latest
+Network=hermesnet.network
+AddDevice={{VEGA_RENDER}}
+Volume={{GBRAIN_DATA_DIR}}/models:/models:Z
+SecurityLabelDisable=true
+Memory=4g
+PublishPort=127.0.0.1:8086:8086
+Exec=--model /models/ggml-large-v3.bin --host 0.0.0.0 --port 8086 --threads 4
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
