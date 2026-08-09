@@ -67,7 +67,7 @@ Choose the model/agent for the new session with flags (or the `OC_MODEL_ID`,
 `OC_MODEL_PROVIDER`, `OC_AGENT` env vars):
 
 ```
-oc --model qwen3.8-max-preview "review the scheduler for races"
+oc --model qwen3.8-max "review the scheduler for races"
 oc --provider bailian-personal --model qwen3.7-plus "refactor X"
 oc --agent plan "design the schema for the billing service"
 ```
@@ -98,11 +98,11 @@ existing/continued session, switch via `ocm`, which talks to the API directly
 (defaults to the most recently used session):
 
 ```
-ocm qwen3.8-max-preview                 # switch model (default provider bailian-personal)
+ocm qwen3.8-max                 # switch model (default provider bailian-personal)
 ocm bailian-personal/qwen3.7-plus       # explicit provider via slash
-ocm qwen3.8-max-preview --provider X    # explicit provider flag
+ocm qwen3.8-max --provider X    # explicit provider flag
 ocm --agent plan                        # switch agent (build/plan)
-ocm qwen3.8-max-preview --agent plan    # both at once
+ocm qwen3.8-max --agent plan    # both at once
 ocm --list                              # show sessions (id, agent, model)
 ocm <model> --session <ses_id>          # target a specific session
 ```

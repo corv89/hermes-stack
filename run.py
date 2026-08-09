@@ -185,6 +185,63 @@ skills:
     - /opt/hermes-skills
 streaming:
   enabled: true
+auxiliary:
+  vision:
+    provider: custom
+    model: qwen3.7-plus
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_mode: anthropic_messages
+    api_key: {alibaba_key}
+  web_extract:
+    provider: custom
+    model: qwen3.6-flash
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  compression:
+    provider: custom
+    model: qwen3.7-max
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  approval:
+    provider: custom
+    model: qwen3.7-max
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  mcp:
+    provider: custom
+    model: qwen3.7-max
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  title_generation:
+    provider: custom
+    model: qwen3.6-flash
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  skills_hub:
+    provider: custom
+    model: qwen3.6-flash
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  curator:
+    provider: custom
+    model: qwen3.6-flash
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  kanban_decomposer:
+    provider: custom
+    model: qwen3.7-max
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  profile_describer:
+    provider: custom
+    model: qwen3.6-flash
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
+  triage_specifier:
+    provider: custom
+    model: deepseek-v4-pro
+    base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1
+    api_key: {alibaba_key}
 mcp_servers:
   gbrain:
     url: http://hermes-gbrain:8083/mcp
@@ -494,7 +551,11 @@ def write_hermes_config(gbrain_access: str) -> None:
     """Deep-merge HERMES_CONFIG_YAML into config.yaml on the hermes-data
     volume (host-side write: with keep-id the volume is owned by the host
     user, so no container round-trip is needed)."""
-    config_yaml = HERMES_CONFIG_YAML.format(gbrain_token=gbrain_access or "MISSING")
+    env = load_env(SCRIPT_DIR / ".env")
+    alibaba_key = env.get("ALIBABA_CODING_PLAN_API_KEY") or "MISSING"
+    config_yaml = HERMES_CONFIG_YAML.format(
+        gbrain_token=gbrain_access or "MISSING",
+        alibaba_key=alibaba_key)
     target = HERMES_DATA_VOL / "config.yaml"
     merged_yaml = config_yaml
     if _HAS_YAML and target.exists():
