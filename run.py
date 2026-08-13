@@ -299,7 +299,7 @@ GBRAIN_CLIENT_STATE = GBRAIN_DATA_DIR / "config" / ".mcp-client.json"
 # generated once and reused across re-registrations (Forgejo just rotates the
 # token); the uuid is captured from `forgejo-cli actions register` output.
 FORGEJO_RUNNER_CREDS = FORGEJO_DATA_DIR / ".runner-creds.json"
-FORGEJO_RUNNER_NAME = "bigbox"
+FORGEJO_RUNNER_NAME = "hermes-runner"
 FORGEJO_RUNNER_LABELS = ["ubuntu-latest:docker://node:20-bullseye"]
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
@@ -746,7 +746,7 @@ def forgejo_bootstrap(cfg: dict[str, str]) -> None:
             log("WARN: Forgejo web server not responding — bootstrap skipped")
             return
 
-        admin_user = cfg.get("FORGEJO_ADMIN_USER", "corv")
+        admin_user = cfg.get("FORGEJO_ADMIN_USER", "admin")
         admin_email = cfg.get("FORGEJO_ADMIN_EMAIL", "forgejo@localhost")
         admin_pass = cfg.get("FORGEJO_ADMIN_PASSWORD", "")
 
@@ -846,7 +846,7 @@ def load_cfg() -> dict[str, str]:
         if not cfg.get(key):
             log(f"ERROR: {key} must be set in .env")
             sys.exit(1)
-    cfg.setdefault("FORGEJO_ADMIN_USER", "corv")
+    cfg.setdefault("FORGEJO_ADMIN_USER", "admin")
     cfg.setdefault("FORGEJO_ADMIN_EMAIL", "forgejo@localhost")
     return cfg
 
@@ -890,7 +890,7 @@ def start_stack(cfg: dict[str, str]) -> None:
     log("Forgejo bootstrap ...")
     forgejo_bootstrap(cfg)
 
-    banner()
+    banner(cfg)
 
 
 def stop_stack() -> None:
@@ -926,14 +926,18 @@ def status() -> None:
     log((r.stdout or "").rstrip())
 
 
-def banner() -> None:
+def banner(cfg: dict[str, str]) -> None:
     log()
     log("=== Stack started (Quadlet units on hermesnet) ===")
     log("WebUI:       http://127.0.0.1:8787")
     log("Sourcebot:   http://127.0.0.1:8181")
     log("Forgejo:     http://127.0.0.1:3000  (git forge + Actions)")
-    log("Tailscale:   https://bigbox.kamori-eel.ts.net        (Hermes :443)")
-    log("             https://bigbox.kamori-eel.ts.net:8443   (Sourcebot)")
+    root_url = cfg.get("FORGEJO_ROOT_URL", "").rstrip("/")
+    if root_url:
+        log(f"Tailscale:   {root_url}        (Hermes :443)")
+        log(f"             {root_url}:8443   (Sourcebot)")
+    else:
+        log("Tailscale:   <tailnet URL not configured>")
     log("OpenCode:    http://127.0.0.1:45650")
     log("SearXNG:     http://127.0.0.1:8888")
     log("Trafilatura: http://127.0.0.1:8100")

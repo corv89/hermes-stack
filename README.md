@@ -263,7 +263,7 @@ through the containers, exactly as before.
 ## Forgejo (git forge)
 
 Self-hosted [Forgejo] (v15 LTS) for repos, PRs, and Forgejo Actions CI with a
-local runner on BigBox. GitHub stays as a **push-mirror backup** (configured
+local runner on the host. GitHub stays as a **push-mirror backup** (configured
 per-repo after install — not automated). The web installer is disabled
 (`INSTALL_LOCK`), so `run.py` bootstraps the admin account and registers the
 Actions runner automatically (`forgejo_bootstrap`, idempotent,
@@ -316,7 +316,7 @@ podman exec hermes-forgejo forgejo dump -f /data/forgejo-dump.zip && \
 
 **Adding the arm64 runner later** (CM5 or another tailnet box) — install the
 `forgejo-runner` binary (or the same container image) there, register it
-offline from BigBox with
+offline from the host with
 `forgejo forgejo-cli actions register --name <n> --scope '' --secret <40hex>`,
 and point its config at the tailnet URL of the forge.
 
