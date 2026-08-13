@@ -1,0 +1,22 @@
+[Unit]
+Description=Prometheus node_exporter — host telemetry (CPU, RAM, disk, net, load)
+# Read-only HTTP endpoint on hermesnet. No input surface, no write path.
+
+[Container]
+ContainerName=hermes-node-exporter
+Image=quay.io/prometheus/node-exporter:latest
+Network=hermesnet.network
+# Bind-mount host /proc, /sys, / read-only so node_exporter reads HOST stats,
+# not container stats. --path.* flags tell it where to look.
+Volume=/proc:/host/proc:ro
+Volume=/sys:/host/sys:ro
+Volume=/:/host/rootfs:ro
+Exec=--path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host/rootfs --collector.filesystem.mount-points-exclude=^/(host|proc|sys|dev)($|/)
+SecurityLabelDisable=true
+PublishPort=127.0.0.1:9100:9100
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

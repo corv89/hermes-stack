@@ -1,0 +1,25 @@
+[Unit]
+Description=Prometheus podman_exporter — container/pod/image/volume stats
+# Connects to the rootless podman socket (read-only HTTP output, no agent
+# access to the socket itself).
+# Requires: systemctl --user enable --now podman.socket
+
+[Container]
+ContainerName=hermes-podman-exporter
+Image=quay.io/navidys/prometheus-podman-exporter:latest
+Network=hermesnet.network
+# %t = $XDG_RUNTIME_DIR (Quadlet systemd specifier). The rootless podman socket
+# lives at /run/user/1000/podman/podman.sock. In rootless podman, container
+# uid 0 maps to the host user (uid 1000) that owns the socket.
+Volume=%t/podman/podman.sock:/run/podman/podman.sock
+Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
+# The image defaults to listening on :9882. Map host 9102 → container 9882.
+User=0
+SecurityLabelDisable=true
+PublishPort=127.0.0.1:9102:9882
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

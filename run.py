@@ -358,6 +358,9 @@ CONTAINER_UNITS = [
     "hermes-playwright",
     "hermes-sourcebot",
     "hermes-webui",
+    "hermes-node-exporter",
+    "hermes-podman-exporter",
+    "hermes-gpu-exporter",
 ]
 CONFIG_SYNC_UNIT = "hermes-config-sync"
 # The runner is NOT in CONTAINER_UNITS: it can only start once its config
@@ -381,6 +384,9 @@ GATES = [
     ("hermes-sourcebot",  "http://127.0.0.1:8181/",                        60,  False, False),
     ("hermes-forgejo",    "http://127.0.0.1:3000/",                        120, False, False),
     ("hermes-webui",      "http://127.0.0.1:8787/",                        180, False, True),
+    ("hermes-node-exporter", "http://127.0.0.1:9100/metrics", 30, False, False),
+    ("hermes-gpu-exporter", "http://127.0.0.1:9101/metrics", 30, False, False),
+    ("hermes-podman-exporter", "http://127.0.0.1:9102/metrics", 30, False, False),
 ]
 
 
@@ -936,6 +942,9 @@ def banner() -> None:
     log("Embeddings:  http://127.0.0.1:8084/v1  (Vulkan/Vega 56)")
     log("Reranker:    http://127.0.0.1:8085/v1  (Vulkan/Vega 56)")
     log("Sidecar:     http://127.0.0.1:8090     (ROCm/R9700)")
+    log("Node exp:  http://127.0.0.1:9100/metrics  (host telemetry)")
+    log("GPU exp:   http://127.0.0.1:9101/metrics  (AMD GPU stats)")
+    log("Podman exp: http://127.0.0.1:9102/metrics (container stats)")
     log("Manage:      python3 run.py --status | --stop | --redeploy")
     log()
 

@@ -1,0 +1,22 @@
+[Unit]
+Description=AMD GPU metrics exporter — reads amdgpu sysfs (utilization, VRAM, temp, power)
+# Zero-dependency Python script reading /sys/class/drm via bind-mounted host sysfs.
+# No ROCm runtime, no /dev/kfd, no rocm-smi — pure sysfs reads. ~12 MB image.
+# Build first: podman build -t localhost/hermes-gpu-exporter:latest -f Containerfile.gpu-exporter .
+
+[Container]
+ContainerName=hermes-gpu-exporter
+Image=localhost/hermes-gpu-exporter:latest
+Network=hermesnet.network
+# Host sysfs read-only — the amdgpu driver exposes all metrics as world-readable
+# sysfs attributes (gpu_busy_percent, mem_info_vram_used, hwmon temp/power/clock).
+Volume=/sys:/host/sys:ro
+Environment=GPU_SYSFS_PATH=/host/sys/class/drm
+SecurityLabelDisable=true
+PublishPort=127.0.0.1:9101:9101
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
