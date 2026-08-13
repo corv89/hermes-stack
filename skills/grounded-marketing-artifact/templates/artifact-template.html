@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Draft — Annotated Artifact (W4 · grounded marketing)</title>
+<style>
+  :root{
+    --ink:#1a1a1a;
+    --mute:#6b6b6b;
+    --accent:#096C9A;
+    --accent-soft:#EAF3F7;
+    --paper:#ffffff;
+    --line:#e5e5e5;
+    --product:#C2410C;
+    --customer:#0E7490;
+    --market:#6D28D9;
+    --fd:'Georgia','Times New Roman',serif;
+    --fs:'Helvetica Neue',Arial,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:var(--fs);line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:900px;margin:0 auto;padding:0 32px}
+
+  /* ==== ANNOTATION BAR ==== */
+  .annobar{background:#0B1A2B;color:#fff;padding:14px 0;position:sticky;top:0;z-index:50}
+  .annobar .wrap{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  .annobar .t{font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(255,255,255,0.55);white-space:nowrap}
+  .legend{display:flex;gap:16px;font-size:12px;align-items:center}
+  .legend .lg{display:flex;align-items:center;gap:6px}
+  .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .dot.product{background:var(--product)} .dot.customer{background:var(--customer)} .dot.market{background:var(--market)}
+  .hint{margin-left:auto;font-size:11px;color:rgba(255,255,255,0.45);white-space:nowrap}
+
+  /* ==== SWAP STRIP ==== */
+  .swaplayer{background:#FFF8EC;border-bottom:1px solid #F3D9A4}
+  .swaplayer .wrap{padding:18px 32px;display:flex;flex-direction:column;gap:6px}
+  .swaplayer .t{font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#92400E;font-weight:700}
+  .swaplayer h3{font-family:var(--fd);font-size:20px;font-style:italic;color:#1a1a1a}
+  .swaplayer p{font-size:14px;color:#57534E;max-width:720px;line-height:1.5}
+
+  /* ==== RISK PIN ==== */
+  .pinwrap{position:relative}
+  .pin{position:absolute;top:16px;right:16px;z-index:20;font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:5px 10px;border-radius:3px;cursor:pointer;font-family:var(--fs);transition:transform 0.12s ease}
+  .pin:hover{transform:scale(1.06)}
+  .pin.product{background:var(--product);color:#fff}
+  .pin.customer{background:var(--customer);color:#fff}
+  .pin.market{background:var(--market);color:#fff}
+  .pinwrap.active{outline:3px solid rgba(0,0,0,0.16);outline-offset:-3px}
+  .pinwrap.active .pin{outline:2px solid #fff;outline-offset:2px}
+
+  /* ==== THE NOTES INSPECTOR (fixed right panel) ==== */
+  .inspector{position:fixed;top:0;right:0;bottom:0;width:380px;background:#0B1A2B;color:#fff;z-index:100;display:flex;flex-direction:column;transform:translateX(100%);transition:transform 0.22s cubic-bezier(0.16,1,0.3,1);box-shadow:-8px 0 32px rgba(0,0,0,0.18)}
+  .inspector.open{transform:translateX(0)}
+  body.reserve{padding-right:380px}
+  body.reserve .annobar{padding-right:380px}
+  body.reserve .note2{right:396px}
+  @media (max-width: 900px){.inspector{width:85vw}body.reserve{padding-right:85vw}}
+  .inspector .head{padding:20px 24px;border-bottom:1px solid rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:space-between}
+  .inspector .head .t{font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(255,255,255,0.55)}
+  .inspector .head .x{background:none;border:1px solid rgba(255,255,255,0.25);color:#fff;font-size:14px;width:26px;height:26px;border-radius:3px;cursor:pointer;line-height:1}
+  .inspector .body{padding:24px;overflow-y:auto;flex:1}
+  .nrisk{font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;margin-bottom:6px}
+  .nrisk.product{color:#FB923C} .nrisk.customer{color:#22D3EE} .nrisk.market{color:#A78BFA}
+  .nbox{background:rgba(255,255,255,0.06);border-radius:4px;padding:14px 16px;margin-top:14px}
+  .nbox .lbl{font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:6px}
+  .nbox p{font-size:14px;line-height:1.55;color:rgba(255,255,255,0.92)}
+  .claimline{font-family:var(--fd);font-style:italic;font-size:15px;color:#fff;line-height:1.5;margin-bottom:4px}
+  .bigq{font-family:var(--fd);font-size:19px;font-style:italic;line-height:1.4;color:#fff}
+  .evidenceline{font-size:13px;color:rgba(255,255,255,0.85);line-height:1.5}
+  .stakesline{font-size:14px;color:#FCA5A5;line-height:1.5}
+  .mapline{font-size:13px;color:rgba(255,255,255,0.8);line-height:1.5}
+  .mapline b{color:#FBBF24;font-weight:600}
+  .ntest{margin-top:18px;padding:16px;border:1px solid rgba(255,255,255,0.18);border-radius:4px}
+  .ntest .lbl{font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#FBBF24;margin-bottom:6px}
+  .ntest p{font-size:14px;line-height:1.55;color:#fff}
+  .conf-badge{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 8px;border-radius:3px;margin-left:8px;vertical-align:middle}
+  .conf-badge.know{background:#059669;color:#fff}
+  .conf-badge.believe{background:#B45309;color:#fff}
+  .empty{color:rgba(255,255,255,0.4);font-size:14px;line-height:1.6;text-align:center;margin-top:60px}
+  .secname{font-family:var(--fd);font-size:20px;font-style:italic;color:rgba(255,255,255,0.85);margin-bottom:4px}
+
+  /* ==== VERDICT ==== */
+  .verdict{background:#0B1A2B;color:#fff;padding:70px 0}
+  .verdict .t{font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#FBBF24;margin-bottom:12px;font-weight:700}
+  .verdict h2{font-family:var(--fd);font-size:clamp(28px,3.6vw,40px);line-height:1.2;margin-bottom:24px}
+  .verdict .gates{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px}
+  .verdict .g{border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:14px}
+  .verdict .g .gn{font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(255,255,255,0.55);margin-bottom:6px}
+  .verdict .g .gs{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em}
+  .verdict .g.pass .gs{color:#34D399}
+  .verdict .g.warn .gs{color:#FBBF24}
+  .verdict .g.fail .gs{color:#F87171}
+  .verdict .readout{font-size:17px;line-height:1.6;color:rgba(255,255,255,0.85);max-width:760px}
+  .verdict .readout b{color:#fff}
+  .verdict .next{margin-top:22px;padding:16px 20px;border:1px solid #FBBF24;border-radius:4px;font-size:15px;color:#FDE68A;max-width:760px}
+  .verdict .next .lbl{font-size:10px;letter-spacing:0.16em;text-transform:uppercase;margin-bottom:4px}
+
+  footer{padding:40px 0 60px;text-align:center;font-size:13px;color:var(--mute);letter-spacing:0.08em;text-transform:uppercase}
+  .note2{position:fixed;bottom:16px;left:16px;background:#fff;border:1px solid var(--line);border-radius:4px;font-size:11px;color:var(--mute);padding:6px 12px;letter-spacing:0.06em;z-index:60}
+</style>
+</head>
+<body>
+
+  <div class="annobar">
+    <div class="wrap">
+      <span class="t">Your risks, pinned to your page</span>
+      <div class="legend">
+        <span class="lg"><span class="dot product"></span> Product risk</span>
+        <span class="lg"><span class="dot customer"></span> Customer risk</span>
+        <span class="lg"><span class="dot market"></span> Market risk</span>
+      </div>
+      <span class="hint">hover a pin → the question opens beside the page</span>
+    </div>
+  </div>
+
+  <div class="swaplayer">
+    <div class="wrap">
+      <div class="t">First check — is this really yours?</div>
+      <h3>Put a competitor's name on this. Would it still work?</h3>
+      <p>If yes — this could belong to anyone. The thing that makes you different is still missing. If no — the part that breaks is the thing only you can say.</p>
+    </div>
+  </div>
+
+  <aside class="inspector" id="inspector">
+    <div class="head">
+      <span class="t">The question · evidence · stakes · check</span>
+      <button class="x" id="closeInspector">✕</button>
+    </div>
+    <div class="body">
+      <div class="empty" id="emptyState">Hover a risk pin on the page.<br>The question opens here —<br>the page stays in view.</div>
+      <div id="noteContent" style="display:none"></div>
+    </div>
+  </aside>
+
+  <!-- ============ ARTIFACT BODY: replace these placeholder sections ============ -->
+
+  <!-- SECTION TEMPLATE (copy per section, fill the data-* attributes and inner copy):
+  <section class="SECTION-CLASS pinwrap" data-section="Section name" data-risk="product|customer|market" data-conf="believe|know" data-claim="The claim, verbatim" data-question="The question we're asking" data-evidence="Evidence status" data-stakes="What's at stake" data-check="How to check it" data-where="Map trace" data-worry="W3 memory note">
+    <div class="pin product|customer|market">Product risk|Customer risk|Market risk</div>
+    <div class="wrap">
+      ... section copy grounded in canvas/journey rows ...
+    </div>
+  </section>
+  -->
+
+  <section class="hero pinwrap" data-section="The promise" data-risk="product" data-conf="believe" data-claim="THE CLAIM" data-question="THE QUESTION" data-evidence="EVIDENCE STATUS" data-stakes="WHAT'S AT STAKE" data-check="HOW TO CHECK" data-where="MAP TRACE" data-worry="W3 NOTE">
+    <div class="pin product">Product risk</div>
+    <div class="wrap">
+      <h1>Hero copy — grounded in the UVP</h1>
+    </div>
+  </section>
+
+  <!-- ============ END ARTIFACT BODY ============ -->
+
+  <!-- THE CHECK -->
+  <section class="verdict">
+    <div class="wrap">
+      <div class="t">The check</div>
+      <h2>What's really yours, what's still a hope, what to test first</h2>
+      <div class="gates">
+        <div class="g pass"><div class="gn">Is it really yours?</div><div class="gs">The swap</div></div>
+        <div class="g warn"><div class="gn">Do customers care?</div><div class="gs">Care / Hope</div></div>
+        <div class="g fail"><div class="gn">Can you prove it?</div><div class="gs">Know / Not sure yet</div></div>
+        <div class="g fail"><div class="gn">Will they pay?</div><div class="gs">Tested / Untested</div></div>
+      </div>
+      <p class="readout">READOUT: what's really yours, what's still a hope, what you know — in plain words.</p>
+      <div class="next">
+        <div class="lbl">Test first</div>
+        The section you're least sure about — what to test, with whom, what counts as evidence.
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">Business · City · W4 grounded artifact</div>
+  </footer>
+
+  <div class="note2">DRAFT · W4 · hover a pin to see the question</div>
+
+<script>
+  var inspector = document.getElementById('inspector');
+  var emptyState = document.getElementById('emptyState');
+  var noteContent = document.getElementById('noteContent');
+  var colorMap = { product: '#FB923C', customer: '#22D3EE', market: '#A78BFA' };
+
+  function showNote(sec){
+    var secname = sec.getAttribute('data-section');
+    var risk = sec.getAttribute('data-risk');
+    var color = colorMap[risk];
+    var claim = sec.getAttribute('data-claim');
+    var question = sec.getAttribute('data-question');
+    var evidence = sec.getAttribute('data-evidence');
+    var stakes = sec.getAttribute('data-stakes');
+    var check = sec.getAttribute('data-check');
+    var where = sec.getAttribute('data-where');
+    var worry = sec.getAttribute('data-worry');
+    var conf = sec.getAttribute('data-conf');
+    var confBadge = conf === 'know'
+      ? '<span class="conf-badge know">know</span>'
+      : '<span class="conf-badge believe">not sure yet</span>';
+
+    emptyState.style.display = 'none';
+    noteContent.style.display = 'block';
+    noteContent.innerHTML =
+      '<div class="nrisk" style="color:' + color + '">' + secname + confBadge + '</div>' +
+      '<div class="nbox"><div class="lbl">The claim</div><p class="claimline">' + claim + '</p><p class="mapline" style="margin-top:8px">' + where + '</p></div>' +
+      '<div class="nbox"><div class="lbl">The question</div><p class="bigq">' + question + '</p></div>' +
+      '<div class="nbox"><div class="lbl">Evidence</div><p class="evidenceline">' + evidence + '</p></div>' +
+      '<div class="nbox"><div class="lbl">What&rsquo;s at stake</div><p class="stakesline">' + stakes + '</p></div>' +
+      '<div class="ntest"><div class="lbl">How to check it</div><p>' + check + '</p></div>' +
+      '<div class="nbox" style="margin-top:10px;background:rgba(255,255,255,0.03)"><div class="lbl">W3 memory</div><p style="font-size:13px">' + worry + '</p></div>';
+
+    inspector.classList.add('open');
+    document.body.classList.add('reserve');
+  }
+
+  document.querySelectorAll('.pinwrap').forEach(function(w){
+    var pin = w.querySelector('.pin');
+    function openNote(){
+      document.querySelectorAll('.pinwrap.active').forEach(function(el){ el.classList.remove('active'); });
+      w.classList.add('active');
+      showNote(w);
+    }
+    pin.addEventListener('mouseenter', openNote);
+    pin.addEventListener('click', openNote);   // click = projector-proof (hover is hard from across the room)
+    w.addEventListener('mouseleave', function(){
+      w.classList.remove('active');
+    });
+  });
+
+  document.getElementById('closeInspector').addEventListener('click', function(){
+    inspector.classList.remove('open');
+    document.body.classList.remove('reserve');
+    emptyState.style.display = 'block';
+    noteContent.style.display = 'none';
+  });
+</script>
+</body>
+</html>
