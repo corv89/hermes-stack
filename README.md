@@ -13,6 +13,16 @@ installs them into `~/.config/containers/systemd/` (plain units into
 All containers join one bridge network, **hermesnet**, and reach each other by
 container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
 
+**What's in the stack:**
+
+- Local-first LLM agent loop with cloud failover (on-box sidecar primary,
+  cloud provider as escalation)
+- Fully-local RAG memory: Postgres + pgvector + local embeddings, zero cloud
+  keys
+- Agentic coding: Hermes drives OpenCode over HTTP
+- Self-hosted git forge + Actions CI (Forgejo)
+- Read-only host/GPU telemetry
+
 ## Architecture
 
 ```
@@ -26,8 +36,8 @@ container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
                     │   │ gbrain RAG memory                    │     │
                     │   │  hermes-gbrain       MCP :8083       │     │
                     │   │  hermes-gbrain-pg    pgvector        │     │
-                    │   │  hermes-llama-embed  :8084 (Vega)    │     │
-                    │   │  hermes-llama-rerank :8085 (Vega)    │     │
+                    │   │  hermes-llama-embed  :8084 (R9700)   │     │
+                    │   │  hermes-llama-rerank :8085 (R9700)   │     │
                     │   └──────────────────────────────────────┘     │
                     │   ┌──────────────────────────────────────┐     │
                     │   │ web-tools (research + extract)       │     │
@@ -38,6 +48,7 @@ container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
                     │   ┌──────────────────────────────────────┐     │
                     │   │ add-ons                              │     │
                     │   │  hermes-sidecar  primary LLM   :8090 │     │
+                    │   │  hermes-whisper  STT           :8086 │     │
                     │   │  sourcebot       research bot  :8181 │     │
                     │   │  hermes-forgejo  git forge     :3000 │     │
                     │   │  hermes-forgejo-runner Actions runner│     │
@@ -49,9 +60,10 @@ container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
 Hermes (the WebUI) is the orchestrator you talk to. It delegates coding tasks
 to the OpenCode server over its HTTP API (via the baked-in `oc` / `ocm`
 wrappers), queries long-term memory through the gbrain MCP server, and
-researches the web through SearXNG → Trafilatura → Playwright. The two skills
-under [`skills/`](skills/) (`opencode-driver`, `web-research`) teach Hermes
-these flows and are baked into the WebUI image.
+researches the web through SearXNG → Trafilatura → Playwright. The four skills
+under [`skills/`](skills/) teach Hermes these flows and are baked into the
+WebUI image: `opencode-driver` and `web-research`, plus two workshop exercise
+skills (lean canvas, customer journey map).
 
 ## Model topology — local-first, cloud escalation
 
@@ -76,7 +88,8 @@ Two sidecar settings exist because of the 64K gate: Hermes refuses any model
 whose context window is below 64K (`MINIMUM_CONTEXT_LENGTH` in `agent_init`),
 so the sidecar runs `CTX_SIZE=65536` (a unified KV pool shared by all slots)
 with `q8_0` KV quantization (`--cache-type-k/-v`) to keep that pool inside the
-R9700's VRAM beside the ~18GB weights. `context_length` in the config must
+R9700's VRAM beside the ~18GB weights and the two 4B embed/rerank servers that
+share the card. `context_length` in the config must
 match the real server pool. Thinking is ON by default (`REASONING_FORMAT=auto`
 routes `<think>` blocks to `reasoning_content`); set `REASONING_FORMAT=none` in
 the sidecar unit for faster, reasoning-free replies.
@@ -89,12 +102,13 @@ the sidecar unit for faster, reasoning-free replies.
 | Core | `hermes-opencode` | built: `images/opencode` | 45650 | OpenCode v2 server; **fatal** |
 | Memory | `hermes-gbrain` | built: `images/gbrain` | 8083 | gbrain MCP (OAuth 2.1) |
 | Memory | `hermes-gbrain-pg` | `pgvector/pgvector:pg17` | (not published) | Postgres + pgvector |
-| Memory | `hermes-llama-embed` | `llama.cpp:server-vulkan` | 8084 | Qwen3-Embedding-4B, Vulkan on Vega 56, 2560-d |
-| Memory | `hermes-llama-rerank` | `llama.cpp:server-vulkan` | 8085 | Qwen3-Reranker-4B, Vulkan on Vega 56 |
+| Memory | `hermes-llama-embed` | built: `images/sidecar` | 8084 | Qwen3-Embedding-4B, ROCm on R9700 (shared `llamacpp-sidecar` image), 2560-d |
+| Memory | `hermes-llama-rerank` | built: `images/sidecar` | 8085 | Qwen3-Reranker-4B, ROCm on R9700 (shared `llamacpp-sidecar` image) |
 | Web | `hermes-searxng` | `searxng/searxng` | 8888→8080 | meta-search |
 | Web | `hermes-trafilatura` | built: `images/trafilatura` | 8100→8000 | fast extraction |
 | Web | `hermes-playwright` | built: `images/playwright` | 8101→8001 | JS-rendered fallback |
 | Add-on | `hermes-sidecar` | built: `images/sidecar` | 8090 | local 27B LLM — Hermes' **primary** model (ROCm on R9700) |
+| Add-on | `hermes-whisper` | built: `images/whisper` | 8086 | whisper.cpp STT, ggml-large-v3, Vulkan |
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | autonomous research pipeline |
 | Add-on | `hermes-forgejo` | `forgejo/forgejo:15` | 3000 | git forge: repos, PRs, Actions |
 | Add-on | `hermes-forgejo-runner` | `forgejo/runner:13` | — | Actions runner via host podman socket |
@@ -102,7 +116,8 @@ the sidecar unit for faster, reasoning-free replies.
 | Add-on | `hermes-gpu-exporter` | built: `hermes-gpu-exporter` | 9101 | amdgpu sysfs metrics (read-only) |
 | Add-on | `hermes-podman-exporter` | `navidys/prometheus-podman-exporter` | 9102 | podman container stats (read-only) |
 
-\* The `sourcebot` image is **built in its own repo** and is optional. The
+\* The `sourcebot` image is **proprietary and optional**: it is built in a
+separate, private repo and will not be published. The
 `sidecar` image builds from `images/sidecar/Containerfile` via
 `python3 run.py --build-sidecar` (pinned llama.cpp commit; heavy — run only
 when bumping llama.cpp or ROCm). `python3 run.py --build` builds everything
@@ -138,8 +153,9 @@ run.py                 orchestrator (render + install + start/status/stop)
 quadlet/               Quadlet templates ({{PLACEHOLDER}} substitution)
 images/                one dir per image we build (bare "Containerfile")
   webui/  opencode/  trafilatura/  playwright/  gbrain/  sidecar/
+  whisper/  gpu-exporter/
 skills/                Hermes agent skills (baked into the webui image)
-  opencode-driver/  web-research/
+  opencode-driver/  web-research/  lean-canvas/  customer-journey-map/
 bin/                   oc, ocm — CLI wrappers baked into the webui image
 config/searxng/        settings.yml for the official searxng image
 .env / .env.example    secrets (gitignored) / template
@@ -155,17 +171,12 @@ All images build with the **repo root as the build context**
   with **linger** enabled (`loginctl enable-linger $USER`) for boot persistence.
 - Python 3.10+ (stdlib only; `PyYAML` optional, used to *merge* rather than
   overwrite the Hermes config).
-- GPUs — developed on a dual-AMD setup:
-  - **Vega 56 (gfx900)** — embeddings + reranker via the llama.cpp **Vulkan**
-    backend (`ghcr.io/ggml-org/llama.cpp:server-vulkan`). ROCm dropped gfx900,
-    but Vulkan (RADV) still supports it. Render node resolved via
-    `/dev/dri/by-path` at render time.
-  - **R9700 (gfx1201)** — the 27B sidecar via **ROCm**, pinned with
-    `ROCR_VISIBLE_DEVICES` (resolved from the KFD topology at render time): a
-    ROCm runtime supports only one GPU generation, and llama.cpp's HIP init
-    fails when it also sees the Vega. The sidecar container needs **full
-    `/dev/dri`** (render-node-only breaks ROCm's agent/node mapping).
-  Without GPUs these containers warn and the rest of the stack still runs.
+- GPUs: one AMD GPU (developed on an R9700 32GB, gfx1201) runs the sidecar,
+  embeddings, and reranker via **ROCm** (`/dev/kfd` + `/dev/dri`, pinned with
+  `ROCR_VISIBLE_DEVICES` resolved from the KFD topology at render time) in one
+  shared VRAM pool. A ROCm runtime supports only one GPU generation, which is
+  why all three llama.cpp servers live on the same card. Without GPUs these
+  units warn and the rest of the stack still runs.
 - ~16 GB RAM minimum for the core; ~64 GB recommended with the full stack.
 - SELinux: handled via `:z`/`:Z` relabel flags and `SecurityLabelDisable=true`
   where a container must read host model files.
