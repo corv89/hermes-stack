@@ -1,6 +1,6 @@
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
-LABEL maintainer="hermes-pod contributors"
+LABEL maintainer="hermes-stack contributors"
 LABEL description="Playwright JS-rendering extraction API for Hermes (Trafilatura fallback)"
 
 ENV PYTHONUNBUFFERED=1

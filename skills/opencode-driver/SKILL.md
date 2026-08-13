@@ -2,7 +2,7 @@
 name: opencode-driver
 description: "Delegate coding to the shared OpenCode v2 server (features, refactors, fixes, review) via targeted API-CLI commands (`oc`, `ocm`). One-shot and multi-turn."
 version: 3.2.0
-author: hermes-pod contributors
+author: hermes-stack contributors
 license: MIT
 platforms: [linux, macos]
 metadata:

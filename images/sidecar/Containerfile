@@ -10,7 +10,7 @@
 # Model: Qwen 3.6 35B-A3B MoE UD Q4_K_XL (~21GB), 3B active params
 # ROCm:  7.2.1 (official rocm/dev-ubuntu-24.04:7.2.1-complete base)
 #
-# Build (hermes-pod repo root):
+# Build (repo root):
 #   python3 run.py --build-sidecar
 #   # or directly:
 #   podman build -t localhost/llamacpp-sidecar:latest \

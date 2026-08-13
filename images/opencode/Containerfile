@@ -1,6 +1,6 @@
 FROM node:22-slim
 
-LABEL maintainer="hermes-pod contributors"
+LABEL maintainer="hermes-stack contributors"
 LABEL description="Contained OpenCode v2 — serves the API for Hermes to drive"
 
 ENV DEBIAN_FRONTEND=noninteractive

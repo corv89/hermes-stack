@@ -1,6 +1,6 @@
 FROM ghcr.io/nesquena/hermes-webui:latest
 
-LABEL maintainer="hermes-pod contributors"
+LABEL maintainer="hermes-stack contributors"
 LABEL description="Hermes WebUI + Hermes Agent + opencode2 thin client"
 
 USER root

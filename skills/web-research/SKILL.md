@@ -2,7 +2,7 @@
 name: web-research
 description: "Web search + content extraction via the in-pod web-tools stack: SearXNG (search), Trafilatura (fast extraction), Playwright (JS-rendered fallback)."
 version: 1.0.0
-author: hermes-pod contributors
+author: hermes-stack contributors
 license: MIT
 platforms: [linux, macos]
 metadata:

@@ -1,4 +1,4 @@
-# hermes-pod
+# hermes-stack
 
 A self-hosted AI workbench on rootless [Podman] **Quadlet units**: the
 **Hermes** agent drives a contained **OpenCode** coding server, backed by a
