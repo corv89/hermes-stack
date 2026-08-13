@@ -1,16 +1,26 @@
 [Unit]
-Description=llama.cpp embeddings - Qwen3-Embedding-4B (Vulkan on Vega 56)
+Description=llama.cpp embeddings - Qwen3-Embedding-4B (ROCm on R9700) [Vega transition]
 
 [Container]
 ContainerName=hermes-llama-embed
-Image=ghcr.io/ggml-org/llama.cpp:server-vulkan
+Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
-AddDevice={{VEGA_RENDER}}
+# Pin to the R9700 agent (same filter the sidecar used). With the Vega removed
+# there is only one GPU, but the pin is harmless and forward-compatible when
+# the 9070 XT arrives.
+Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX}}
+# Full /dev/dri required: the ROCm runtime fails agent/node mapping when only
+# the render node is passed (verified on the sidecar).
+AddDevice=/dev/kfd
+AddDevice=/dev/dri
+GroupAdd=video
 Volume={{GBRAIN_DATA_DIR}}/models:/models:Z
 SecurityLabelDisable=true
 Memory=8g
 PublishPort=127.0.0.1:8084:8084
-Exec=--model /models/{{EMBED_MODEL_FILE}} --alias Qwen3-Embedding-4B --embeddings --host 0.0.0.0 --port 8084 --n-gpu-layers 99 --threads 4
+# The sidecar image has no ENTRYPOINT (CMD only), so Exec= must include the
+# full llama-server command. LD_LIBRARY_PATH and PATH are baked into the image.
+Exec=llama-server --model /models/{{EMBED_MODEL_FILE}} --alias Qwen3-Embedding-4B --embeddings --host 0.0.0.0 --port 8084 --n-gpu-layers 99 --threads 4 --ctx-size 2048 --batch-size 512 --ubatch-size 256
 
 [Service]
 Restart=on-failure

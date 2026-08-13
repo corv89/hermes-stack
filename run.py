@@ -37,7 +37,7 @@ else is warn-and-continue so an add-on hiccup never blocks it.
 
 GPU layout (dual-GPU host):
   Vega 56 (gfx900, 8GB)   - embed + rerank via the llama.cpp Vulkan backend
-  R9700   (gfx1201, 32GB) - sidecar 27B LLM via ROCm (pinned via
+  R9700   (gfx1201, 32GB) - sidecar 35B-A3B MoE via ROCm (pinned via
                             ROCR_VISIBLE_DEVICES: a ROCm runtime supports only
                             one GPU generation, so it must not see the Vega)
 """
@@ -71,7 +71,7 @@ GBRAIN_DATA_DIR = Path(os.environ.get("GBRAIN_DATA_DIR", "/opt/gbrain-data"))
 HERMES_DATA_VOL = (Path.home() /
                    ".local/share/containers/storage/volumes/hermes-data/_data")
 
-# 27B model load can be slow; we wait this long for the sidecar health gate.
+# 35B-A3B MoE load can be slow; we wait this long for the sidecar health gate.
 SIDECAR_READY_TIMEOUT = 240
 
 # Model files for gbrain's local embedding/reranking servers.
@@ -115,6 +115,15 @@ def render_node(pci_addr: str) -> str:
     return os.path.realpath(link)
 
 
+def _safe_render_node(pci_addr: str) -> str:
+    """Like render_node, but returns '' if the GPU is absent (transition mode)."""
+    try:
+        return render_node(pci_addr)
+    except RuntimeError:
+        log(f"WARN: GPU {pci_addr} render node not found — transition mode")
+        return ""
+
+
 def rocm_agent_index(gfx_target: int) -> str:
     """GPU agent index (for ROCR_VISIBLE_DEVICES) of a gfx target in the KFD
     topology. The CPU node (gfx_target_version 0) is skipped."""
@@ -141,6 +150,7 @@ def rocm_agent_index(gfx_target: int) -> str:
 SENSITIVE = {
     "HERMES_WEBUI_PASSWORD",
     "ZAI_API_KEY",
+    "OPENCODE_ZHIPU_API_KEY",
     "GLM_API_KEY",
     "OPENCODE_SERVER_PASS",
     "OPENCODE_SERVER_PASSWORD",
@@ -154,7 +164,7 @@ SENSITIVE = {
 # {gbrain_token} placeholder is replaced with a freshly minted MCP token).
 #
 # Model topology — LOCAL-FIRST with cloud escalation:
-#   * Primary is the on-box ROCm sidecar (Qwen3.6-27B on the R9700), exposed
+#   * Primary is the on-box ROCm sidecar (Qwen3.6-35B-A3B on the R9700), exposed
 #     as an OpenAI-compatible endpoint and registered as a named custom
 #     provider `sidecar`. model.provider: custom:sidecar selects it.
 #   * fallback_providers is Hermes' ordered failover chain, tried when the
@@ -172,7 +182,7 @@ providers:
     base_url: http://hermes-sidecar:8090/v1
 model:
   provider: custom:sidecar
-  default: qwen3.6-27b
+  default: qwen3.6-35b-a3b
   # Explicit (matches providers.sidecar): deep-merge never deletes keys, so
   # this clobbers the stale cloud base_url left over from the zai-primary era.
   base_url: http://hermes-sidecar:8090/v1
@@ -323,7 +333,6 @@ CONTAINER_UNITS = [
     "hermes-sidecar",
     "hermes-llama-embed",
     "hermes-llama-rerank",
-    "hermes-whisper",
     "hermes-gbrain-pg",
     "hermes-gbrain",
     "hermes-searxng",
@@ -342,7 +351,6 @@ GATES = [
     ("hermes-sidecar",    "http://127.0.0.1:8090/health",                  SIDECAR_READY_TIMEOUT, True, False),
     ("hermes-llama-embed",  "http://127.0.0.1:8084/health",                120, False, False),
     ("hermes-llama-rerank", "http://127.0.0.1:8085/health",                120, False, False),
-    ("hermes-whisper", "http://127.0.0.1:8086/health", 120, False, False),
     ("hermes-gbrain-pg",  "pg",                                            30,  False, False),
     ("hermes-gbrain",     "http://127.0.0.1:8083/",                        120, False, False),
     ("hermes-searxng",    "http://127.0.0.1:8888/search?q=test&format=json", 60, False, False),
@@ -414,7 +422,7 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "REPO": str(SCRIPT_DIR),
         "PROJECT_MOUNT": PROJECT_MOUNT,
         "GBRAIN_DATA_DIR": str(GBRAIN_DATA_DIR),
-        "VEGA_RENDER": render_node(GPU_PCI_VULKAN),
+        "VEGA_RENDER": _safe_render_node(GPU_PCI_VULKAN),
         "ROCR_INDEX": rocm_agent_index(GPU_GFX_ROCM),
         "EMBED_MODEL_FILE": EMBED_MODEL_FILE,
         "RERANK_MODEL_FILE": RERANK_MODEL_FILE,
@@ -422,6 +430,7 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "OPENCODE_PASSWORD": cfg["OPENCODE_SERVER_PASSWORD"],
         "HERMES_WEBUI_PASSWORD": cfg["HERMES_WEBUI_PASSWORD"],
         "ZAI_API_KEY": cfg["ZAI_API_KEY"],
+        "OPENCODE_ZHIPU_API_KEY": cfg.get("OPENCODE_ZHIPU_API_KEY", ""),
         "GBRAIN_ADMIN_TOKEN": cfg["GBRAIN_ADMIN_TOKEN"],
     }
     units: dict[str, str] = {}

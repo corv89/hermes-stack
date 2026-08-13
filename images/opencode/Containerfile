@@ -11,7 +11,7 @@ RUN apt-get update \
         python3 python3-venv python3-pip python3-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @opencode-ai/cli@0.0.0-next-15919
+RUN npm install -g @opencode-ai/cli@0.0.0-next-17163
 
 # uv / uvx (fast Python package & env manager) from the official distroless image.
 # Placed after the (stable) apt/npm layers so a moving uv:latest only rebuilds

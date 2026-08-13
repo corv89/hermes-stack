@@ -1,16 +1,19 @@
 [Unit]
-Description=llama.cpp reranker - Qwen3-Reranker-4B (Vulkan on Vega 56)
+Description=llama.cpp reranker - Qwen3-Reranker-4B (ROCm on R9700) [Vega transition]
 
 [Container]
 ContainerName=hermes-llama-rerank
-Image=ghcr.io/ggml-org/llama.cpp:server-vulkan
+Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
-AddDevice={{VEGA_RENDER}}
+Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX}}
+AddDevice=/dev/kfd
+AddDevice=/dev/dri
+GroupAdd=video
 Volume={{GBRAIN_DATA_DIR}}/models:/models:Z
 SecurityLabelDisable=true
 Memory=8g
 PublishPort=127.0.0.1:8085:8085
-Exec=--model /models/{{RERANK_MODEL_FILE}} --alias Qwen3-Reranker-4B --reranking --host 0.0.0.0 --port 8085 --n-gpu-layers 99 --threads 4
+Exec=llama-server --model /models/{{RERANK_MODEL_FILE}} --alias Qwen3-Reranker-4B --reranking --host 0.0.0.0 --port 8085 --n-gpu-layers 99 --threads 4 --ctx-size 2048 --batch-size 512 --ubatch-size 256
 
 [Service]
 Restart=on-failure

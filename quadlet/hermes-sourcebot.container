@@ -11,6 +11,8 @@ Environment=PLAYWRIGHT_URL=http://hermes-playwright:8001
 Secret=sourcebot-zai-api-key,type=env,target=ZAI_API_KEY
 Secret=sourcebot-keepa-api-key,type=env,target=KEEPA_API_KEY
 Secret=sourcebot-logfire-token,type=env,target=LOGFIRE_TOKEN
+Secret=dataforseo-base64,type=env,target=DATAFORSEO_BASE64
+Secret=dataforseo-base64,type=env,target=DATAFORSEO_BASE64
 Volume={{HOME}}/Src/sourcebot/data:/app/data
 Volume={{HOME}}/Src/sourcebot/config:/app/config:ro
 Memory=4g

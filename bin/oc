@@ -101,7 +101,10 @@ def approve_permissions(sid):
         pid = p.get("id") or p.get("requestID")
         if not pid:
             continue
-        for body in ({"reply": "approve"}, {"action": "approve"}, {"approved": True}):
+        # The reply body field is `reply` with enum once|always|reject
+        # (GET /openapi.json, schema PermissionV2.Reply). "always" persists
+        # the permission project-wide so later headless runs don't re-prompt.
+        for body in ({"reply": "always"}, {"reply": "once"}):
             resp = req("POST", f"/api/session/{sid}/permission/{pid}/reply", body)
             if not (isinstance(resp, dict) and resp.get("_error")):
                 break

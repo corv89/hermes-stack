@@ -6,6 +6,7 @@ ContainerName=hermes-opencode
 Image=localhost/hermes-opencode:latest
 Network=hermesnet.network
 Environment=OPENCODE_PASSWORD={{OPENCODE_PASSWORD}}
+Environment=ZHIPU_API_KEY={{OPENCODE_ZHIPU_API_KEY}}
 Volume={{HOME}}/.config/opencode:/root/.config/opencode:ro,Z
 Volume=opencode-data:/root/.local/share/opencode
 Volume={{PROJECT_MOUNT}}:/work:rw,z
