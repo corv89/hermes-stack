@@ -125,8 +125,8 @@ read-only).
   `/sys`, `/`).
 - `hermes-gpu-exporter` — http://127.0.0.1:9101/metrics: AMD GPU
   utilization, VRAM, temp, power from amdgpu sysfs (pure sysfs reads — no
-  ROCm runtime). Image builds from `Containerfile.gpu-exporter`:
-  `podman build -t localhost/hermes-gpu-exporter:latest -f Containerfile.gpu-exporter .`
+  ROCm runtime). Image builds from `images/gpu-exporter`:
+  `podman build -t localhost/hermes-gpu-exporter:latest images/gpu-exporter`
 - `hermes-podman-exporter` — http://127.0.0.1:9102/metrics: container,
   image, and volume stats via the rootless podman socket
   (`systemctl --user enable --now podman.socket`).
