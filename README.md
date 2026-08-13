@@ -41,6 +41,7 @@ container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
                     │   │  sourcebot       research bot  :8181 │     │
                     │   │  hermes-forgejo  git forge     :3000 │     │
                     │   │  hermes-forgejo-runner Actions runner│     │
+                    │   │  *-exporter        telemetry  :9100-2│     │
                     │   └──────────────────────────────────────┘     │
                     └────────────────────────────────────────────────┘
 ```
@@ -97,6 +98,9 @@ the sidecar unit for faster, reasoning-free replies.
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | autonomous research pipeline |
 | Add-on | `hermes-forgejo` | `forgejo/forgejo:15` | 3000 | git forge: repos, PRs, Actions |
 | Add-on | `hermes-forgejo-runner` | `forgejo/runner:13` | — | Actions runner via host podman socket |
+| Add-on | `hermes-node-exporter` | `prometheus/node-exporter` | 9100 | host telemetry (read-only) |
+| Add-on | `hermes-gpu-exporter` | built: `hermes-gpu-exporter` | 9101 | amdgpu sysfs metrics (read-only) |
+| Add-on | `hermes-podman-exporter` | `navidys/prometheus-podman-exporter` | 9102 | podman container stats (read-only) |
 
 \* The `sourcebot` image is **built in its own repo** and is optional. The
 `sidecar` image builds from `images/sidecar/Containerfile` via
@@ -108,6 +112,24 @@ else; plain `python3 run.py` does **not** rebuild images.
 readiness gates. Everything else is warn-and-continue, and gbrain tolerates a
 missing Postgres/embedding server (it keeps the last-good config). So the core
 agent pair runs even on a machine with no GPU, no gbrain, and no add-ons.
+
+### Telemetry exporters
+
+Three read-only Prometheus exporters run on hermesnet, published to localhost
+only. They expose host/container metrics for scraping; none of them has a
+write path into the host (bind mounts are `:ro`, the podman socket is used
+read-only).
+
+- `hermes-node-exporter` — http://127.0.0.1:9100/metrics: host CPU, RAM,
+  disk, net, load (stock `node-exporter` reading bind-mounted `/proc`,
+  `/sys`, `/`).
+- `hermes-gpu-exporter` — http://127.0.0.1:9101/metrics: AMD GPU
+  utilization, VRAM, temp, power from amdgpu sysfs (pure sysfs reads — no
+  ROCm runtime). Image builds from `Containerfile.gpu-exporter`:
+  `podman build -t localhost/hermes-gpu-exporter:latest -f Containerfile.gpu-exporter .`
+- `hermes-podman-exporter` — http://127.0.0.1:9102/metrics: container,
+  image, and volume stats via the rootless podman socket
+  (`systemctl --user enable --now podman.socket`).
 
 ## Repository layout
 
@@ -268,6 +290,11 @@ per-repo after install — not automated). The web installer is disabled
 (`INSTALL_LOCK`), so `run.py` bootstraps the admin account and registers the
 Actions runner automatically (`forgejo_bootstrap`, idempotent,
 warn-and-continue like every add-on).
+
+The runner itself is the `quadlet/hermes-forgejo-runner.container` unit:
+`run.py` writes its config (`/opt/forgejo-runner/config/runner-config.yml`,
+mode `0600`) and starts the unit after registration. Jobs run through the
+host's rootless podman socket (Docker-compatible API).
 
 **One-time host prep** — data dirs owned by you, plus the rootless podman
 socket the runner drives jobs through (Docker-compatible API):
