@@ -1,0 +1,24 @@
+[Unit]
+Description=Forgejo git forge (repos, PRs, Actions)
+
+[Container]
+ContainerName=hermes-forgejo
+Image=data.forgejo.org/forgejo/forgejo:15
+Network=hermesnet.network
+Environment=USER_UID=1000
+Environment=USER_GID=1000
+Environment=FORGEJO____APP_NAME=Hermes Forge
+Environment=FORGEJO__security__INSTALL_LOCK=true
+Environment=FORGEJO__server__ROOT_URL={{FORGEJO_ROOT_URL}}
+Environment=FORGEJO__service__DISABLE_REGISTRATION=true
+Environment=FORGEJO__repository__DEFAULT_PRIVATE=last
+Environment=FORGEJO__actions__ENABLED=true
+Environment=FORGEJO__actions__DEFAULT_ACTIONS_URL=https://github.com
+Volume=/opt/forgejo-data:/data:Z
+PublishPort=127.0.0.1:3000:3000
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

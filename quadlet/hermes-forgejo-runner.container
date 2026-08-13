@@ -1,0 +1,23 @@
+[Unit]
+Description=Forgejo Actions runner (host, x86_64)
+After=hermes-forgejo.container
+
+[Container]
+ContainerName=hermes-forgejo-runner
+Image=data.forgejo.org/forgejo/runner:13
+Network=hermesnet.network
+UserNS=keep-id:uid=1000,gid=1000
+Environment=DOCKER_HOST=unix:///run/host/podman.sock
+Volume=/opt/forgejo-runner/config/runner-config.yml:/data/runner-config.yml:ro,Z
+Volume=/opt/forgejo-runner/data:/data/state:Z
+Volume=/run/user/1000/podman/podman.sock:/run/host/podman.sock
+Exec=forgejo-runner daemon --config /data/runner-config.yml
+
+[Service]
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=60
+
+[Install]
+WantedBy=default.target

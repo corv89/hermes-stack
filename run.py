@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -68,6 +70,10 @@ UNIT_DIR = Path.home() / ".config" / "containers" / "systemd"
 SYSTEMD_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 PROJECT_MOUNT = os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src"))
 GBRAIN_DATA_DIR = Path(os.environ.get("GBRAIN_DATA_DIR", "/opt/gbrain-data"))
+# Forgejo data dir is created once by the user with sudo (the container's
+# entrypoint must chown it); run.py only warns when it is absent.
+FORGEJO_DATA_DIR = Path("/opt/forgejo-data")
+FORGEJO_RUNNER_DIR = Path("/opt/forgejo-runner")
 HERMES_DATA_VOL = (Path.home() /
                    ".local/share/containers/storage/volumes/hermes-data/_data")
 
@@ -158,6 +164,7 @@ SENSITIVE = {
     "POSTGRES_PASSWORD",
     "GBRAIN_ADMIN_BOOTSTRAP_TOKEN",
     "GBRAIN_ADMIN_TOKEN",
+    "FORGEJO_ADMIN_PASSWORD",
 }
 
 # Deep-merged into the Hermes config.yaml on the hermes-data volume (the
@@ -288,6 +295,16 @@ _SECRET_CHECK_PY = (
 # injected into the Hermes config as a Bearer header.
 GBRAIN_CLIENT_STATE = GBRAIN_DATA_DIR / "config" / ".mcp-client.json"
 
+# Forgejo Actions runner credentials (host-side): the registration secret is
+# generated once and reused across re-registrations (Forgejo just rotates the
+# token); the uuid is captured from `forgejo-cli actions register` output.
+FORGEJO_RUNNER_CREDS = FORGEJO_DATA_DIR / ".runner-creds.json"
+FORGEJO_RUNNER_NAME = "bigbox"
+FORGEJO_RUNNER_LABELS = ["ubuntu-latest:docker://node:20-bullseye"]
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
 # Runs inside hermes-opencode (on hermesnet): reads client creds from stdin (or
 # registers a new DCR client), mints a client_credentials access token, prints
 # {client_id, client_secret, access_token} as JSON (or {"error": ...}).
@@ -335,6 +352,7 @@ CONTAINER_UNITS = [
     "hermes-llama-rerank",
     "hermes-gbrain-pg",
     "hermes-gbrain",
+    "hermes-forgejo",
     "hermes-searxng",
     "hermes-trafilatura",
     "hermes-playwright",
@@ -342,7 +360,11 @@ CONTAINER_UNITS = [
     "hermes-webui",
 ]
 CONFIG_SYNC_UNIT = "hermes-config-sync"
-ALL_UNITS = CONTAINER_UNITS + [CONFIG_SYNC_UNIT]
+# The runner is NOT in CONTAINER_UNITS: it can only start once its config
+# file exists, so forgejo_bootstrap() starts it explicitly. It belongs in
+# ALL_UNITS so --stop/--redeploy cover it.
+FORGEJO_RUNNER_UNIT = "hermes-forgejo-runner"
+ALL_UNITS = CONTAINER_UNITS + [CONFIG_SYNC_UNIT, FORGEJO_RUNNER_UNIT]
 
 # Readiness gates, checked from the host against the localhost-published ports.
 # (name, url or "pg", timeout_s, require_2xx, fatal)
@@ -357,6 +379,7 @@ GATES = [
     ("hermes-trafilatura", "http://127.0.0.1:8100/health",                 30,  False, False),
     ("hermes-playwright", "http://127.0.0.1:8101/health",                  30,  False, False),
     ("hermes-sourcebot",  "http://127.0.0.1:8181/",                        60,  False, False),
+    ("hermes-forgejo",    "http://127.0.0.1:3000/",                        120, False, False),
     ("hermes-webui",      "http://127.0.0.1:8787/",                        180, False, True),
 ]
 
@@ -432,6 +455,7 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "ZAI_API_KEY": cfg["ZAI_API_KEY"],
         "OPENCODE_ZHIPU_API_KEY": cfg.get("OPENCODE_ZHIPU_API_KEY", ""),
         "GBRAIN_ADMIN_TOKEN": cfg["GBRAIN_ADMIN_TOKEN"],
+        "FORGEJO_ROOT_URL": cfg.get("FORGEJO_ROOT_URL", "http://127.0.0.1:3000/"),
     }
     units: dict[str, str] = {}
     for f in sorted(QUADLET_SRC.iterdir()):
@@ -678,14 +702,146 @@ def recreate_container(name: str) -> None:
     systemctl_user("start", svc)
 
 
+# --- forgejo ------------------------------------------------------------------
+def _redacted(argv: list[str], hide: str) -> list[str]:
+    """argv copy safe to log: the secret is passed as a flag VALUE (not
+    KEY=value), so redact() would not catch it — mask it here."""
+    return ["***" if a == hide else a for a in argv]
+
+
+def _write_runner_creds(creds: dict) -> None:
+    FORGEJO_RUNNER_CREDS.write_text(json.dumps(creds))
+    FORGEJO_RUNNER_CREDS.chmod(0o600)
+
+
+def forgejo_bootstrap(cfg: dict[str, str]) -> None:
+    """Idempotent Forgejo admin-user + Actions-runner bootstrap.
+
+    Forge is an add-on: every step is warn-and-continue, nothing here is ever
+    fatal to the core stack."""
+    try:
+        if not FORGEJO_DATA_DIR.exists():
+            log(f"WARN: {FORGEJO_DATA_DIR} missing — Forgejo bootstrap skipped. "
+                "One-time host prep (README → Forgejo):")
+            log(f"      sudo mkdir -p {FORGEJO_DATA_DIR} "
+                f"{FORGEJO_RUNNER_DIR / 'config'} {FORGEJO_RUNNER_DIR / 'data'}")
+            log(f'      sudo chown "$USER": {FORGEJO_DATA_DIR} {FORGEJO_RUNNER_DIR} '
+                f"{FORGEJO_RUNNER_DIR / 'config'} {FORGEJO_RUNNER_DIR / 'data'}")
+            return
+
+        # Belt-and-braces: the readiness gate already waited for the web server.
+        up = False
+        for _ in range(30):
+            if http_up("http://127.0.0.1:3000/"):
+                up = True
+                break
+            time.sleep(1)
+        if not up:
+            log("WARN: Forgejo web server not responding — bootstrap skipped")
+            return
+
+        admin_user = cfg.get("FORGEJO_ADMIN_USER", "corv")
+        admin_email = cfg.get("FORGEJO_ADMIN_EMAIL", "forgejo@localhost")
+        admin_pass = cfg.get("FORGEJO_ADMIN_PASSWORD", "")
+
+        # --- admin user (non-zero on repeat runs = "already exists": benign) ---
+        argv = ["podman", "exec", "--user", "git", "hermes-forgejo", "forgejo", "admin", "user",
+                "create", "--admin", "--username", admin_user,
+                "--email", admin_email, "--password", admin_pass,
+                "--must-change-password=false"]
+        log("+ " + " ".join(shlex.quote(a) for a in _redacted(argv, admin_pass)))
+        r = run(argv, check=False, quiet=True)
+        if r.returncode != 0:
+            combined = ((r.stdout or "") + (r.stderr or "")).lower()
+            if "already exists" not in combined:
+                err = (r.stderr or r.stdout or "").strip().splitlines()
+                log(f"WARN: forgejo admin user create: "
+                    f"{err[0] if err else 'exit ' + str(r.returncode)}")
+        else:
+            log(f"  Forgejo admin user '{admin_user}' ensured")
+
+        # --- runner registration (offline, scriptable; re-runs rotate the
+        #     token, so this is safe every start and self-heals) ---
+        creds: dict = {}
+        if FORGEJO_RUNNER_CREDS.exists():
+            try:
+                creds = json.loads(FORGEJO_RUNNER_CREDS.read_text())
+            except (OSError, ValueError):
+                log(f"WARN: unreadable {FORGEJO_RUNNER_CREDS}; regenerating")
+                creds = {}
+        secret = creds.get("secret") or secrets.token_hex(20)
+        creds = {"secret": secret, "uuid": creds.get("uuid", "")}
+
+        reg_argv = ["podman", "exec", "--user", "git", "hermes-forgejo", "forgejo",
+                    "forgejo-cli", "actions", "register",
+                    "--name", FORGEJO_RUNNER_NAME, "--scope", "",
+                    "--secret", secret]
+        log("+ " + " ".join(shlex.quote(a) for a in _redacted(reg_argv, secret)))
+        r = run(reg_argv, check=False, quiet=True)
+        if r.returncode != 0:
+            h = run(["podman", "exec", "hermes-forgejo", "forgejo",
+                     "forgejo-cli", "actions", "register", "--help"],
+                    check=False, quiet=True)
+            log("WARN: runner registration failed — `actions register --help` "
+                "(check the scope flag for this Forgejo version):")
+            log(((h.stdout or "") + (h.stderr or "")).rstrip())
+            _write_runner_creds(creds)  # keep the secret for a retry
+            return
+        for line in reversed((r.stdout or "").strip().splitlines()):
+            m = _UUID_RE.search(line)
+            if m:
+                creds["uuid"] = m.group(0)
+                break
+        _write_runner_creds(creds)
+        log(f"  runner '{FORGEJO_RUNNER_NAME}' registered "
+            f"(uuid={creds['uuid'] or '?'})")
+
+        # --- runner config (always rewritten: cheap and self-healing) ---
+        labels = "\n".join(f"  - {lab}" for lab in FORGEJO_RUNNER_LABELS)
+        config = ("host:\n"
+                  "  workdir_parent: /data/state\n"
+                  "server:\n"
+                  "  connections:\n"
+                  "    forgejo:\n"
+                  "      url: http://hermes-forgejo:3000/\n"
+                  f"      uuid: {creds['uuid']}\n"
+                  f"      token: {creds['secret']}\n"
+                  f"labels:\n{labels}\n")
+        cfg_path = FORGEJO_RUNNER_DIR / "config" / "runner-config.yml"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(config)
+        cfg_path.chmod(0o600)
+        log(f"  wrote {cfg_path}")
+
+        # --- start the runner (no HTTP gate; poll container state) ---
+        systemctl_user("start", FORGEJO_RUNNER_UNIT + ".service", check=False)
+        running = False
+        for _ in range(20):
+            ins = run(["podman", "inspect", "-f", "{{.State.Running}}",
+                       FORGEJO_RUNNER_UNIT], check=False, quiet=True)
+            if (ins.stdout or "").strip() == "true":
+                running = True
+                break
+            time.sleep(1)
+        if running:
+            log(f"  {FORGEJO_RUNNER_UNIT} running (Forgejo Actions online)")
+        else:
+            log(f"WARN: {FORGEJO_RUNNER_UNIT} not running — "
+                f"`podman logs {FORGEJO_RUNNER_UNIT}`")
+    except Exception as e:  # add-on: never fatal to the core stack
+        log(f"WARN: Forgejo bootstrap failed: {e}")
+
+
 # --- orchestration ------------------------------------------------------------
 def load_cfg() -> dict[str, str]:
     cfg = load_env(SCRIPT_DIR / ".env")
     for key in ("OPENCODE_SERVER_PASSWORD", "HERMES_WEBUI_PASSWORD",
-                "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN"):
+                "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN", "FORGEJO_ADMIN_PASSWORD"):
         if not cfg.get(key):
             log(f"ERROR: {key} must be set in .env")
             sys.exit(1)
+    cfg.setdefault("FORGEJO_ADMIN_USER", "corv")
+    cfg.setdefault("FORGEJO_ADMIN_EMAIL", "forgejo@localhost")
     return cfg
 
 
@@ -693,6 +849,15 @@ def prepare_dirs() -> None:
     (SCRIPT_DIR / "hermes-workspace").mkdir(exist_ok=True)
     for subdir in ("pg", "config", "brain", "models"):
         (GBRAIN_DATA_DIR / subdir).mkdir(parents=True, exist_ok=True)
+    # Forgejo runner state (host-owned via keep-id). FORGEJO_DATA_DIR itself is
+    # deliberately NOT created here — it must be created once with sudo (README
+    # → Forgejo host prep) and forgejo_bootstrap() warns + skips when absent.
+    try:
+        for subdir in ("config", "data"):
+            (FORGEJO_RUNNER_DIR / subdir).mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log(f"WARN: could not prepare Forgejo runner dirs ({e}); "
+            "see README → Forgejo (git forge) host prep")
 
 
 def start_stack(cfg: dict[str, str]) -> None:
@@ -716,6 +881,9 @@ def start_stack(cfg: dict[str, str]) -> None:
     for name, url, timeout, require_ok, fatal in GATES:
         wait_gate(name, url, timeout, require_ok, fatal)
 
+    log("Forgejo bootstrap ...")
+    forgejo_bootstrap(cfg)
+
     banner()
 
 
@@ -733,7 +901,8 @@ def redeploy(cfg: dict[str, str]) -> None:
     for name in ("hermes-opencode", "hermes-sidecar", "hermes-llama-embed",
                  "hermes-llama-rerank", "hermes-gbrain-pg", "hermes-gbrain",
                  "hermes-searxng", "hermes-trafilatura", "hermes-playwright",
-                 "sourcebot", "hermes-webui"):
+                 "sourcebot", "hermes-webui",
+                 "hermes-forgejo", FORGEJO_RUNNER_UNIT):
         run(["podman", "rm", "-f", name], check=False, quiet=True)
     start_stack(cfg)
 
@@ -756,6 +925,7 @@ def banner() -> None:
     log("=== Stack started (Quadlet units on hermesnet) ===")
     log("WebUI:       http://127.0.0.1:8787")
     log("Sourcebot:   http://127.0.0.1:8181")
+    log("Forgejo:     http://127.0.0.1:3000  (git forge + Actions)")
     log("Tailscale:   https://bigbox.kamori-eel.ts.net        (Hermes :443)")
     log("             https://bigbox.kamori-eel.ts.net:8443   (Sourcebot)")
     log("OpenCode:    http://127.0.0.1:45650")

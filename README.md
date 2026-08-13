@@ -39,6 +39,8 @@ container name (`hermes-opencode`, `hermes-gbrain`, `hermes-sidecar`, ...).
                     │   │ add-ons                              │     │
                     │   │  hermes-sidecar  primary LLM   :8090 │     │
                     │   │  sourcebot       research bot  :8181 │     │
+                    │   │  hermes-forgejo  git forge     :3000 │     │
+                    │   │  hermes-forgejo-runner Actions runner│     │
                     │   └──────────────────────────────────────┘     │
                     └────────────────────────────────────────────────┘
 ```
@@ -93,6 +95,8 @@ the sidecar unit for faster, reasoning-free replies.
 | Web | `hermes-playwright` | built: `images/playwright` | 8101→8001 | JS-rendered fallback |
 | Add-on | `hermes-sidecar` | built: `images/sidecar` | 8090 | local 27B LLM — Hermes' **primary** model (ROCm on R9700) |
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | autonomous research pipeline |
+| Add-on | `hermes-forgejo` | `forgejo/forgejo:15` | 3000 | git forge: repos, PRs, Actions |
+| Add-on | `hermes-forgejo-runner` | `forgejo/runner:13` | — | Actions runner via host podman socket |
 
 \* The `sourcebot` image is **built in its own repo** and is optional. The
 `sidecar` image builds from `images/sidecar/Containerfile` via
@@ -147,7 +151,7 @@ All images build with the **repo root as the build context**
 ## Quickstart
 
 ```bash
-cp .env.example .env       # then fill in the four required values
+cp .env.example .env       # then fill in the five required values
 python3 run.py --build     # once: build the images
 python3 run.py             # install/refresh units, start the stack, run gates
 ```
@@ -174,8 +178,10 @@ stack comes up at boot — no hand-written service.
 
 ### Secrets
 
-Four keys live in `.env` (see `.env.example`). In addition, `sourcebot` and the
-gbrain Postgres password use **podman secrets** created out-of-band:
+Five keys live in `.env` (see `.env.example`): the four core keys plus
+`FORGEJO_ADMIN_PASSWORD` (the Forgejo admin account `run.py` bootstraps). In
+addition, `sourcebot` and the gbrain Postgres password use **podman secrets**
+created out-of-band:
 
 ```bash
 printf '%s' "$VALUE" | podman secret create <name> -
@@ -184,6 +190,10 @@ printf '%s' "$VALUE" | podman secret create <name> -
 > Use `printf '%s'`, **not** `echo` — `echo` appends a trailing newline, which
 > makes external APIs (e.g. Keepa) reject the key while it looks empty/expired.
 > `run.py` runs a pre-flight check that warns about whitespace in known secrets.
+
+The Forgejo **runner registration secret** is deliberately *not* in `.env`:
+`run.py` auto-generates it and persists it in
+`/opt/forgejo-data/.runner-creds.json` (mode `0600`).
 
 ### gbrain memory
 
@@ -250,6 +260,70 @@ Everything else (opencode, gbrain, sourcebot, ...) keeps the default rootless
 user namespace — their volumes stay subordinate-uid owned and are managed
 through the containers, exactly as before.
 
+## Forgejo (git forge)
+
+Self-hosted [Forgejo] (v15 LTS) for repos, PRs, and Forgejo Actions CI with a
+local runner on BigBox. GitHub stays as a **push-mirror backup** (configured
+per-repo after install — not automated). The web installer is disabled
+(`INSTALL_LOCK`), so `run.py` bootstraps the admin account and registers the
+Actions runner automatically (`forgejo_bootstrap`, idempotent,
+warn-and-continue like every add-on).
+
+**One-time host prep** — data dirs owned by you, plus the rootless podman
+socket the runner drives jobs through (Docker-compatible API):
+
+```bash
+sudo mkdir -p /opt/forgejo-data /opt/forgejo-runner/config /opt/forgejo-runner/data
+sudo chown "$USER": /opt/forgejo-data /opt/forgejo-runner /opt/forgejo-runner/config /opt/forgejo-runner/data
+systemctl --user enable --now podman.socket   # runner's Docker-compatible endpoint
+```
+
+**`.env` keys** — `FORGEJO_ADMIN_USER`, `FORGEJO_ADMIN_EMAIL`,
+`FORGEJO_ADMIN_PASSWORD` are required (the web installer is off, so the admin
+account can only come from `run.py`). Optional `FORGEJO_ROOT_URL` for public
+links/emails once exposed via Tailscale.
+
+**Access** — http://127.0.0.1:3000. Tailnet exposure: `tailscale serve --bg 3000`,
+then set `FORGEJO_ROOT_URL` to the https URL and re-run `python3 run.py`.
+
+**GitHub backup mirror** (per repo, one-time) — create the repo on GitHub,
+create a PAT (classic, `repo` scope), then in Forgejo: Settings → Repository →
+Mirror Settings → push mirror `https://github.com/<user>/<repo>.git`,
+username + PAT, enable "Sync when new commits are pushed". API equivalent:
+`POST /api/v1/repos/{owner}/{repo}/push_mirrors`.
+
+> **Warning:** the push mirror **force-pushes**. GitHub is the backup, never
+> the primary — once mirroring is on, never push to GitHub directly, or a
+> mirror sync will clobber divergent GitHub-side commits.
+
+**Migrating a repo from GitHub** (make Forgejo the primary-of-record) —
+`git clone --mirror` on the host, push the mirror to Forgejo, then add the
+push mirror back to GitHub, then flip your local clones' `origin` to Forgejo.
+
+**Porting workflows** — copy `.github/workflows/` → `.forgejo/workflows/`.
+Forgejo Actions is familiar, not byte-compatible (runner v13 is stricter: no
+`set-output`/`add-path`, invalid matrices fail hard). `DEFAULT_ACTIONS_URL`
+points at GitHub, so ported workflows keep using `uses: actions/checkout@v4`
+unchanged.
+
+**Backup/restore** — git data is covered by the GitHub mirror; for a full
+instance snapshot:
+
+```bash
+podman exec hermes-forgejo forgejo dump -f /data/forgejo-dump.zip && \
+  podman cp hermes-forgejo:/data/forgejo-dump.zip .
+```
+
+**Adding the arm64 runner later** (CM5 or another tailnet box) — install the
+`forgejo-runner` binary (or the same container image) there, register it
+offline from BigBox with
+`forgejo forgejo-cli actions register --name <n> --scope '' --secret <40hex>`,
+and point its config at the tailnet URL of the forge.
+
+**Upgrades** — bump the image tag. Patch-level `:15` tag bumps are safe:
+`podman pull` + `python3 run.py --redeploy`. Major upgrades (X → X+1) require
+reading the release notes for manual steps first.
+
 ## Tailscale (optional)
 
 To reach the WebUI and Sourcebot from your tailnet only:
@@ -265,3 +339,4 @@ tailscale serve --bg --https=8443 8181        # Sourcebot -> https://<host>:8443
 [MIT](LICENSE)
 
 [Podman]: https://podman.io
+[Forgejo]: https://forgejo.org
