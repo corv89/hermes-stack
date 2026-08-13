@@ -63,7 +63,9 @@ wrappers), queries long-term memory through the gbrain MCP server, and
 researches the web through SearXNG → Trafilatura → Playwright. The four skills
 under [`skills/`](skills/) teach Hermes these flows and are baked into the
 WebUI image: `opencode-driver` and `web-research`, plus two workshop exercise
-skills (lean canvas, customer journey map).
+skills (lean canvas, customer journey map). The two workshop skills were
+contributed by [Karlen Chang](https://github.com/KarlenChang) through his
+business workshop. Thanks to him for sharing them.
 
 ## Model topology: local-first, cloud escalation
 
@@ -375,6 +377,16 @@ sudo tailscale set --operator=$USER          # one-time, enables sudo-free serve
 tailscale serve --bg 8787                     # Hermes  -> https://<host>/
 tailscale serve --bg --https=8443 8181        # Sourcebot -> https://<host>:8443
 ```
+
+## Related: CasadoraOS
+
+hermes-stack runs as rootless Podman Quadlets on Fedora with systemd user
+units. [CasadoraOS](https://casadora.net) is an image-based Fedora bootc
+distribution for home infrastructure built from the same ingredients
+(Fedora, systemd, Podman, Quadlets). Running hermes-stack on a CasadoraOS
+host is therefore a natural pairing: the stack's quadlets are host-image
+agnostic. It is a promising direction to explore, though not yet a
+supported configuration.
 
 ## License
 
