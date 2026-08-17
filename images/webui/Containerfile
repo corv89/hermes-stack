@@ -96,16 +96,11 @@ PYEOF
 # Patch docker_init.bash: install [messaging] + [voice] Python extras alongside [all].
 RUN sed -i 's/$_stage_src\[all\]/$_stage_src[all,messaging,voice]/' /hermeswebui_init.bash
 
-# Bake the opencode-driver skill into a dedicated root-owned dir, registered
-# via skills.external_dirs in config.yaml (see run.py). Root-owned so Hermes
-# (uid 501) can't modify/delete it; discovered by the agent via external_dirs.
-# Update by editing the host file and rebuilding the image.
-COPY skills/opencode-driver/SKILL.md \
-     /opt/hermes-skills/opencode-driver/SKILL.md
-
-# Bake the web-research skill (SearXNG/Trafilatura/Playwright search+extract flow).
-COPY skills/web-research/SKILL.md \
-     /opt/hermes-skills/web-research/SKILL.md
+# Bake the shipped skills (single source of truth: hermes-pod/skills/).
+# Root-owned so the agent cannot modify them; discovered via
+# skills.external_dirs in config.yaml (see run.py). Update by editing
+# the host file and rebuilding the image.
+COPY skills/ /opt/hermes-skills/
 
 # Bake the `oc` wrapper so Hermes can drive OpenCode with a one-liner.
 COPY --chmod=755 bin/oc /usr/local/bin/oc

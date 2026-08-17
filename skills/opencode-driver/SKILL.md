@@ -1,7 +1,7 @@
 ---
 name: opencode-driver
-description: "Delegate coding to the shared OpenCode v2 server (features, refactors, fixes, review) via targeted API-CLI commands (`oc`, `ocm`). One-shot and multi-turn."
-version: 3.2.0
+description: "Delegate coding to the shared OpenCode v2 server (features, refactors, fixes, review) via targeted API-CLI commands (`oc`, `ocm`). One-shot, multi-turn, and fire-and-forget HTTP dispatch."
+version: 4.2.0
 author: hermes-stack contributors
 license: MIT
 platforms: [linux, macos]
@@ -54,13 +54,70 @@ mirror of `/work` (which only OpenCode writes).
 - You want an external coding agent to perform the file edits.
 - One-shot tasks and multi-turn / long-running coding sessions.
 
-## One-shot tasks (`oc`)
+## Delegation discipline — `oc` receives intent, not file contents
 
-For a single bounded task, run it on a fresh session. The reply goes to stdout;
-the session id goes to stderr (capture it if you'll continue the session):
+**Never use `oc` as a dumb file writer.** OpenCode is an autonomous coding agent
+that reads context, reasons about changes, runs tests, and verifies its own work.
+Using `oc` to say "write these exact bytes to this exact file" defeats the entire
+purpose and bypasses the safety boundary the architecture provides.
+
+The read-only `/work` mount is a **design feature**, not an inconvenience to work
+around. The split:
+
+- **OpenCode** holds the read-write mount. It exercises judgment on *how* to
+  achieve the goal — what files to touch, what patterns to follow, how to verify.
+- **Hermes** sees `/work` read-only. You plan, review, and verify — but you don't
+  write source. If you've already determined the exact change, write the spec to
+  `/workspace` and hand OpenCode a real task.
+
+**Correct**: `oc "Add input validation to the create_user endpoint — reject
+empty usernames and emails without '@'. Add tests."` — OpenCode decides which
+files, what validation library, how to structure the tests.
+
+**Wrong**: `oc "Write exactly these bytes to src/api.py: <content>"` — this is
+using OpenCode as `tee` with extra steps. If you need to write a file yourself,
+write to `/workspace` (your scratch space), not via `oc`.
+
+## Spec discipline (CDD — applies to every delegation)
+
+Established 2026-08-14 after recurring delegation losses between Hermes and
+OpenCode. Root cause analysis: Hermes **samples** the codebase (every file
+read costs main-model context) while OpenCode **enumerates** (ripgrep over
+the whole repo is free for it). A spec written from sampling describes an
+assumed ground truth; the implementer then meets the real one, and the
+mismatch is invisible to both sides unless something checks. Three rules
+close the three failure modes:
+
+1. **Ground-truth citations.** Reference exact files, symbols, and current
+   values in the spec — not paraphrases. Name the file, the line, the
+   current value being changed. This lets the implementer diff the spec's
+   claims against the repo and flag mismatches (it did exactly this on
+   2026-08-14: caught a stale comment the spec didn't list).
+2. **CDD invariants — state what must NOT change.** Explicit exclusion
+   zones ("do not touch /work/sourcebot") and pinned values ("X stays
+   unchanged"). The stronger the invariants, the weaker (cheaper/local)
+   the implementer can be. A contract-following implementer is safe when
+   the contract pins the non-negotiables.
+3. **Adversarial review against ground truth, not the spec.** After the
+   task completes, review the diff asking "what did the SPEC get wrong
+   about the repo" — not just "does the diff match the spec". Reading the
+   actual diff (git diff in the repo) is mandatory, not optional; the
+   agent's self-reported summary is a claim, not evidence.
+
+Write specs to `/workspace/<name>-spec.md` with these three sections
+(Changes / Invariants / Verification), then hand off:
+`oc "Apply the change spec in /workspace/<name>-spec.md"`.
+
+## Two calling patterns
+
+### Pattern A: Blocking (short tasks, < 10 min)
+
+For bounded tasks that will finish within the terminal timeout. The reply goes to
+stdout; the session id goes to stderr. This is backward-compatible with all
+existing usage.
 
 ```
-terminal(command="oc \"Add retry logic to the API client and update the tests\"", workdir="/work")
+terminal(command='oc "Add retry logic to the API client and update the tests"', workdir="/work")
 ```
 
 Choose the model/agent for the new session with flags (or the `OC_MODEL_ID`,
@@ -72,10 +129,44 @@ oc --provider bailian-personal --model qwen3.7-plus "refactor X"
 oc --agent plan "design the schema for the billing service"
 ```
 
+Customize the blocking timeout:
+
+```
+oc --timeout 900 "complex refactor that needs more time"
+```
+
+**Timeout kills the client wrapper, not the server-side session.** If a blocking
+call exits with timeout (exit code 3), the agent is almost certainly still
+working server-side. The stderr message tells you the session id. Reattach
+with `oc --session <id> "continue"` or use `oc_collect.py` from the
+opencode-async skill. Do not report failure.
+
+**Never use foreground `terminal()` for `oc` calls.** The foreground cap is
+600s and silently truncates longer `--timeout` values. Always use:
+```
+terminal(command='oc --timeout 1200 "task"', workdir="/work",
+         background=true, notify_on_complete=true)
+```
+Background mode has no ceiling on `oc`'s side. The server-side session
+outlives any client timeout.
+
+For fire-and-forget dispatch (session keeps running after your process
+exits), see the opencode-async skill for the HTTP API dispatch/collect
+pattern and the timeout philosophy (guard against runaways, not
+hard-working agents).
+
+### Exit codes
+
+| Code | Meaning | Session state |
+|------|---------|---------------|
+| 0 | Success — result on stdout | Done |
+| 1 | Error or timeout — check stderr | May still be active |
+| 3 | Timed out — session still alive | Active (reattach/collect) |
+
 ## Multi-turn sessions (`oc --session` / `oc --continue`)
 
 Sessions persist on the server, so you can iterate without the TUI. Capture the
-`[oc] session=<id>` line from the first call, then continue that exact session:
+session id, then continue that exact session:
 
 ```
 # turn 1 (capture the session id printed to stderr)
@@ -90,6 +181,10 @@ oc --session ses_abc123 "Add tests for the expiry path"
 prefer the explicit `--session <id>` for reliable chaining). A continued session
 keeps its model/agent; change them with `ocm` (below). `oc` always waits for the
 *new* reply to your prompt, not the previous turn's answer.
+
+Multi-turn sessions can also be dispatched fire-and-forget via the HTTP
+API (`POST /api/session/{sid}/prompt` is non-blocking) — see opencode-async
+for the dispatch/collect pattern.
 
 ## Choosing / switching model & agent (`ocm`)
 
@@ -116,6 +211,7 @@ tasks run to completion. If a task requires an interactive decision, OpenCode ma
 raise a question/form; for those advanced cases the session question/form API
 endpoints exist, but routine coding tasks are handled automatically.
 
+
 ## Verification
 
 The project is read-only for you, but it reflects OpenCode's edits. Verify by:
@@ -130,6 +226,9 @@ The project is read-only for you, but it reflects OpenCode's edits. Verify by:
   mount). The one place you write is `/workspace` (your scratch/output dir,
   read-only for OpenCode) — use it for plans and for keeping artifacts from
   OpenCode's replies.
+- **Never use `oc` as a filesystem escape hatch.** Don't use it to write exact
+  file contents you've already determined. Give it intent and constraints; let it
+  exercise judgment. See "Delegation discipline" above.
 - **Never use `/api/shell` or any raw shell endpoint** on the OpenCode server.
   Use `oc` and `ocm` only.
 - The OpenCode server is the safety boundary; it runs in its own container.
