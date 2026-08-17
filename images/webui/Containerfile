@@ -12,9 +12,10 @@ USER root
 # without libatomic.so.1 on minimal Debian (upstream #87460, fix
 # #87467 still open; keep until install.sh handles it itself).
 # ripgrep + ffmpeg: stripped from the refreshed base; ffmpeg is needed
-# for TTS voice messages.
+# for TTS voice messages. make/gcc/g++: node-gyp native builds
+# (node-pty) during install npm step.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libatomic1 ripgrep ffmpeg \
+    && apt-get install -y --no-install-recommends libatomic1 ripgrep ffmpeg make gcc g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Hermes Agent (non-interactive, skip setup wizard)
@@ -27,7 +28,8 @@ RUN apt-get update \
 # Commit pin: v0.20.2 release cut (2026-08-16); upstream main has a
 # stale uv.lock (pyproject changed post-cut, lock not bumped).
 COPY images/webui/install-cached.sh /tmp/install.sh
-RUN bash /tmp/install.sh --skip-setup --commit df4b65147d7ddd74dd449f9067aabbca5aef0ec7
+# npm cache → /tmp: build-time HOME is unmapped in podman userns (EACCES).
+RUN npm_config_cache=/tmp/.npm-cache bash /tmp/install.sh --skip-setup --commit df4b65147d7ddd74dd449f9067aabbca5aef0ec7
 
 # Symlink the agent into a path the webui init already searches.
 RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
