@@ -23,7 +23,7 @@ RUN apt-get update \
 # URL, re-review, replace file, update hash here.
 # Commit pin: v0.20.2 release cut (2026-08-16); upstream main has a
 # stale uv.lock (pyproject changed post-cut, lock not bumped).
-COPY install-cached.sh /tmp/install.sh
+COPY images/webui/install-cached.sh /tmp/install.sh
 RUN bash /tmp/install.sh --skip-setup --commit df4b65147d7ddd74dd449f9067aabbca5aef0ec7
 
 # Symlink the agent into a path the webui init already searches.
