@@ -29,7 +29,10 @@ RUN apt-get update \
 # stale uv.lock (pyproject changed post-cut, lock not bumped).
 COPY images/webui/install-cached.sh /tmp/install.sh
 # npm cache → /tmp: build-time HOME is unmapped in podman userns (EACCES).
-RUN npm_config_cache=/tmp/.npm-cache bash /tmp/install.sh --skip-setup --commit df4b65147d7ddd74dd449f9067aabbca5aef0ec7
+# --skip-browser/--skip-computer-use: browser work is delegated to the
+# hermes-playwright container (PLAYWRIGHT_URL); webui needs no Chromium,
+# browser-use CLI, or cua-driver. npm install (node-pty) still runs.
+RUN npm_config_cache=/tmp/.npm-cache bash /tmp/install.sh --skip-setup --skip-browser --skip-computer-use --commit df4b65147d7ddd74dd449f9067aabbca5aef0ec7
 
 # Symlink the agent into a path the webui init already searches.
 RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
