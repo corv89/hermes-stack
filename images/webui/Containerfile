@@ -10,13 +10,18 @@ USER root
 
 # Preinstall libatomic1: install.sh's managed Node 26 cannot start
 # without libatomic.so.1 on minimal Debian (upstream #87460, fix
-# #87467 still open). Keep until install.sh handles it itself.
+# #87467 still open; keep until install.sh handles it itself).
+# ripgrep + ffmpeg: stripped from the refreshed base; ffmpeg is needed
+# for TTS voice messages.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libatomic1 \
+    && apt-get install -y --no-install-recommends libatomic1 ripgrep ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Hermes Agent (non-interactive, skip setup wizard)
-RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+# Pinned hermes-agent commit (2026-08-17, proven-good install): upstream
+# main currently has a stale uv.lock breaking `uv sync --locked`. To
+# refresh: verify upstream main builds, resolve new full SHA, update here.
+RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --commit cbc1054e2387c51b51f128b24a507481dc5b221d
 
 # Symlink the agent into a path the webui init already searches.
 RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
