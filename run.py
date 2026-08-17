@@ -206,16 +206,34 @@ model:
   # Explicit (matches providers.sidecar): deep-merge never deletes keys, so
   # this clobbers the stale cloud base_url left over from the zai-primary era.
   base_url: http://hermes-sidecar:8090/v1
-  # Matches the full per-slot context of the sidecar pool (CTX_SIZE 262144 /
-  # NP 2 = 128K per slot); Hermes may consume a full slot when Sourcebot is
-  # idle.
-  context_length: 131072
 agent:
   api_max_retries: 1
 fallback_providers:
   - provider: zai
     model: glm-5.3
     base_url: https://api.z.ai/api/coding/paas/v4
+
+# Context pins: qwen3.8-27b on the sidecar serves 131072 (slot math CTX_SIZE
+# 262144 / NP 2 = 128K per slot, so Hermes may consume a full slot when
+# Sourcebot is idle); qwen3.8-max serves a 1,000,000-token window per the
+# Alibaba token-plan portal; glm-5.3 (and 5.2, which z.ai silently redirects
+# to 5.3) serve a 1,048,576-token window on the coding endpoint, verified by
+# endpoint bisection 2026-08-17. The agent's hardcoded registry and the
+# models.dev catalog lag (glm-5.3 falls to the generic 202752 catch-all),
+# so pin them here; model_overrides is Hermes' step-0b self-unblock path and
+# config-sync deep-merge preserves it.
+model_overrides:
+  custom:sidecar:
+    qwen3.8-27b:
+      context_window: 131072
+  alibaba:
+    qwen3.8-max:
+      context_window: 1000000
+  zai:
+    glm-5.3:
+      context_window: 1048576
+    glm-5.2:
+      context_window: 1048576
 skills:
   external_dirs:
     - /opt/hermes-skills
