@@ -1,4 +1,7 @@
-FROM ghcr.io/nesquena/hermes-webui:latest
+# Base pinned by digest 2026-08-17 (was :latest; silent drift broke the
+# build — see libatomic1 note below). To refresh: pull latest locally,
+# verify, resolve new digest, update here.
+FROM ghcr.io/nesquena/hermes-webui@sha256:b1b77b6a5cece59144a3634f4324eace057d00c54bac4ad8b581c9aa3f359bb5
 
 LABEL maintainer="hermes-stack contributors"
 LABEL description="Hermes WebUI + Hermes Agent + opencode2 thin client"
