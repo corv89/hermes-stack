@@ -1,7 +1,7 @@
 ---
 name: opencode-driver
 description: "Delegate coding to the shared OpenCode v2 server (features, refactors, fixes, review) via targeted API-CLI commands (`oc`, `ocm`). One-shot, multi-turn, and fire-and-forget HTTP dispatch."
-version: 4.2.0
+version: 4.3.0
 author: hermes-stack contributors
 license: MIT
 platforms: [linux, macos]
@@ -107,6 +107,13 @@ close the three failure modes:
 Write specs to `/workspace/<name>-spec.md` with these three sections
 (Changes / Invariants / Verification), then hand off:
 `oc "Apply the change spec in /workspace/<name>-spec.md"`.
+
+**Path rule:** the OpenCode server only sees its own mounts (`/work`,
+`/workspace`). Never reference paths outside them (e.g. `/home/hermeswebui/...`)
+in a task prompt or spec — sessions referencing unreadable paths hang silently
+with empty assistant messages and no pending permissions (diagnosed 2026-08-17:
+two 10-minute hangs). Stage any source file into `/workspace` first, reference
+it from the spec, and clean up after commit.
 
 ## Two calling patterns
 
