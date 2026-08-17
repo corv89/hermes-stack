@@ -33,6 +33,7 @@ Environment=ZAI_API_KEY={{ZAI_API_KEY}}
 Environment=SEARXNG_URL=http://hermes-searxng:8080
 Environment=TRAFILATURA_URL=http://hermes-trafilatura:8000
 Environment=PLAYWRIGHT_URL=http://hermes-playwright:8001
+Environment=PAH_TOKEN={{PAH_TOKEN}}
 Volume=hermes-data:/home/hermeswebui/.hermes
 # keep-id cannot chown the image-owned /home/hermeswebui; give the agent's
 # dot-dirs their own volumes so uid 1000 can create/write them.

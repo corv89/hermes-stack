@@ -135,6 +135,10 @@ COPY --chmod=755 bin/oc /usr/local/bin/oc
 # Ctrl+X M model picker does not render through the PTY bridge).
 COPY --chmod=755 bin/ocm /usr/local/bin/ocm
 
+# Bake the `pc` client (PAH one-liner against the hermes-pah service;
+# X-PAH-Token from the webui's PAH_TOKEN env — zero new mounts or sockets).
+COPY --chmod=755 bin/pc /usr/local/bin/pc
+
 # Rootless (keep-id) startup: the init's /app seed uses `cp -a`, which fails
 # preserving attributes on the root-owned /app dir itself ("Operation not
 # permitted") when running unprivileged even though the content copy succeeds.

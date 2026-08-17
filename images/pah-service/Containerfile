@@ -1,0 +1,51 @@
+# hermes-pah service: in-process PAH execution for the webui (v2 design —
+# spec: /workspace/skill-sync/pah-service-wiring-spec.md). ONE long-lived
+# container on hermesnet; /run and /plan spawn the vendored driver as a
+# plain subprocess per task. No runner containers, no podman socket, no
+# host execution — the opencode-server pattern.
+
+# Base pinned by digest — same pin as pah-runner. To refresh: pull
+# python:3.12-slim locally, verify, resolve the new digest, update here.
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+
+LABEL maintainer="hermes-stack contributors"
+LABEL description="PAH service: FastAPI front end for the vendored PAH driver (in-process execution)"
+
+USER root
+
+# git only: the implementer-role allowlist includes it, slim ships none.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+COPY images/pah-service/app/requirements.txt /tmp/requirements.txt
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Vendored from the canonical /workspace/pah-driver/pah.py — byte-identical
+# copy, canonical source remains /workspace/pah-driver/pah.py (immutable;
+# never edit the vendored file, re-copy from the source). Pinned against the
+# proven venv that produced requirements.txt (pydantic-ai-harness==0.21.0).
+# Provenance lives here, not in the vendored file itself.
+# --chmod=644: source file is 600, COPY preserves mode.
+COPY --chmod=644 images/pah-driver/pah.py /opt/pah-driver/pah.py
+
+# Records land in /opt/pah-driver/runs (RUNS_DIR is relative to pah.py's
+# dir) — the pah-runs volume mounts there at run time (same named volume
+# the scripts/pc runner uses).
+ENV PATH=/opt/venv/bin:$PATH VIRTUAL_ENV=/opt/venv
+
+# Runs as in-container root under the default rootless userns (= host uid
+# 1000), the opencode-server precedent: no USER/UserNS lines. pah.py's
+# ~/.hermes/.env fallback is inert here — keys come from the quadlet env;
+# no secrets file is mounted or created.
+
+COPY images/pah-service/app/main.py /opt/pah-service/main.py
+WORKDIR /opt/pah-service
+
+# hermesnet-internal only — the quadlet sets no PublishPort.
+EXPOSE 8210
+
+# Auth is enforced on /healthz too, so the in-container probe sends the
+# quadlet-injected token from env.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["python", "-c", "import os, urllib.request; r = urllib.request.Request('http://127.0.0.1:8210/healthz'); r.add_header('X-PAH-Token', os.environ.get('PAH_TOKEN', '')); urllib.request.urlopen(r, timeout=3)"]
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8210"]

@@ -1,0 +1,19 @@
+# Generated from the proven venv (/workspace/pah-driver/venv, pip freeze),
+# filtered to the runtime deps the driver stack imports — transitive deps
+# (anyio, httpcore, certifi, starlette, click, ...) resolve at build time
+# from these pins. The 10 driver pins below are byte-identical to
+# images/pah-runner/requirements.txt (cross-checked against the venv freeze
+# per the pah-runner spec block); fastapi + uvicorn were pinned from a
+# throwaway /tmp venv at current stable (2026-08-17).
+genai-prices==0.1.3
+httpx==0.28.1
+httpx2==2.10.0
+openai==3.1.0
+pydantic==2.13.4
+pydantic-ai-harness==0.21.0
+pydantic-ai-slim==2.31.0
+pydantic-graph==2.31.0
+pydantic_core==2.46.4
+tiktoken==0.13.0
+fastapi==0.141.1
+uvicorn==0.52.3

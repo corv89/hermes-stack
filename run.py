@@ -462,6 +462,14 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "OPENCODE_ZHIPU_API_KEY": cfg.get("OPENCODE_ZHIPU_API_KEY", ""),
         "GBRAIN_ADMIN_TOKEN": cfg["GBRAIN_ADMIN_TOKEN"],
         "FORGEJO_ROOT_URL": cfg.get("FORGEJO_ROOT_URL", "http://127.0.0.1:3000/"),
+        # PAH keys: read by scripts/pc at call time; templated into the
+        # hermes-pah quadlet env (empty renders as MISSING in pc doctor).
+        "GLM_API_KEY": cfg.get("GLM_API_KEY", ""),
+        "ALIBABA_TOKEN_PLAN_API_KEY": cfg.get("ALIBABA_TOKEN_PLAN_API_KEY", ""),
+        # Minted at render time when .env lacks it (the run.py forgejo-creds
+        # fallback pattern); hermes-pah and the webui render together in this
+        # one pass, so the pair always matches.
+        "PAH_TOKEN": cfg.get("PAH_TOKEN") or secrets.token_hex(20),
     }
     units: dict[str, str] = {}
     for f in sorted(QUADLET_SRC.iterdir()):
@@ -687,6 +695,7 @@ def build_images() -> None:
     run(['podman', 'pull', 'docker.io/searxng/searxng:latest'])
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/webui/Containerfile'), '-t', 'localhost/hermes-webui:latest', str(SCRIPT_DIR)])
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/pah-runner/Containerfile'), '-t', 'localhost/hermes-pah-runner:latest', str(SCRIPT_DIR)])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/pah-service/Containerfile'), '-t', 'localhost/hermes-pah:latest', str(SCRIPT_DIR)])
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/gbrain/Containerfile'),
          '-t', 'localhost/gbrain:latest', str(SCRIPT_DIR)])
     run(['podman', 'pull', LLAMA_IMAGE_CPU])

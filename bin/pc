@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""pc — PAH client for the webui container: drive the hermes-pah service.
+
+Container-only twin of scripts/pc (the host keeps the interactive wrapper;
+this one is baked into the webui image next to oc/ocm). The service holds
+the mounts and the model keys; this client is a stdlib-only HTTP shim —
+no host execution, nothing but hermesnet HTTP authenticated with
+X-PAH-Token. Spec: /workspace/skill-sync/pah-service-wiring-spec.md.
+
+Usage (surface identical to scripts/pc):
+    pc [--dry-run] [--timeout N] run --workspace /work/<repo> --task - [--max-revisions N]
+    pc [...] plan --workspace /work/<repo> --task - [--out <file>]
+    pc [...] doctor
+    pc [...] show <run-id>
+
+--task accepts inline text, '-' (stdin, read here), or a /work-relative
+file path (the SERVICE reads files — no path is passed through to the
+driver). pc plan --out <file> writes the returned spec_text CLIENT-side;
+the server never writes outside /work and the records volume.
+
+--dry-run prints method, URL and JSON body (task text truncated, token
+redacted) without sending anything.
+
+Exit codes restore pah.py's own 0/1/2/3 contract: 200→0 (doctor reports 3
+when a key is MISSING, as pah doctor does), 224→1 fail-verdict, 225→2
+revision-limit, any other 4xx/5xx→3. Error response bodies print to stderr
+verbatim.
+
+Env:
+    PAH_TOKEN   required to send (quadlet-injected into the webui)
+    PC_URL      service base url (default http://hermes-pah:8210)
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DEFAULT_URL = "http://hermes-pah:8210"
+DEFAULT_TIMEOUT = 3600
+GRACE_S = 30  # let the service's own timeout answer before the socket drops
+EXIT_OK, EXIT_FAIL, EXIT_REVLIMIT, EXIT_INFRA = 0, 1, 2, 3
+TASK_PREVIEW = 200
+
+USAGE = """usage: pc [--dry-run] [--timeout N] <pah-args...>
+  e.g. pc run --workspace /work/repo --task -
+       pc plan --workspace /work/repo --task - --out /work/spec.md
+       pc doctor
+       pc show <run-id>"""
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(f"pc: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def usage() -> None:
+    print(USAGE, file=sys.stderr)
+    sys.exit(2)
+
+
+# --- request assembly ---------------------------------------------------------
+
+
+def workspace_to_repo(ws: str) -> str:
+    """--workspace accepts /work/<repo> or a bare <repo>; anything outside
+    /work is rejected client-side (the service would 400 it anyway)."""
+    ws = ws.rstrip("/") if ws else ""
+    if not ws or ws == "/work":
+        die("--workspace must be a repo under /work, not /work itself")
+    if ws.startswith("/work/"):
+        rel = ws[len("/work/"):]
+    elif ws.startswith("/"):
+        die(f"--workspace must live under /work (got {ws!r})")
+    else:
+        rel = ws
+    if not rel or rel.startswith("/") or ".." in rel.split("/"):
+        die(f"bad --workspace: {ws!r}")
+    return rel
+
+
+def resolve_task_arg(value: str) -> str:
+    if value == "-":
+        data = sys.stdin.read()
+        if not data.strip():
+            die("empty task on stdin")
+        return data
+    if not value.strip():
+        die("empty --task (inline text, '-', or a /work-relative file path)")
+    return value
+
+
+def send(method: str, path: str, body: dict, timeout: int):
+    """POST JSON with the token header. Returns (status, parsed, raw);
+    exits 3 on connection failure (service down = infra)."""
+    base = os.environ.get("PC_URL", DEFAULT_URL).rstrip("/")
+    token = os.environ.get("PAH_TOKEN", "")
+    if not token:
+        die("PAH_TOKEN not set (the webui quadlet injects it)")
+    url = base + path
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 method=method)
+    req.add_header("X-PAH-Token", token)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout + GRACE_S) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            return resp.status, json.loads(raw or "{}"), raw
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw), raw
+        except json.JSONDecodeError:
+            return e.code, {}, raw
+    except urllib.error.URLError as e:
+        print(f"pc: cannot reach {url}: {e.reason}", file=sys.stderr)
+        sys.exit(EXIT_INFRA)
+
+
+def dry_run_print(method: str, path: str, body: dict) -> None:
+    base = os.environ.get("PC_URL", DEFAULT_URL).rstrip("/")
+    printable = dict(body)
+    if "task" in printable:
+        t = str(printable["task"])
+        printable["task"] = t if len(t) <= TASK_PREVIEW else (
+            t[:TASK_PREVIEW] + f"...[{len(t)} chars total]")
+    print(f"{method} {base}{path}")
+    print(json.dumps(printable, indent=2))
+    print("X-PAH-Token: <redacted>")
+
+
+def err_body_exit(status: int, raw: str) -> int:
+    if raw:
+        print(raw, file=sys.stderr)  # error body, verbatim
+    else:
+        print(f"pc: HTTP {status}", file=sys.stderr)
+    return EXIT_INFRA
+
+
+# --- subcommands ---------------------------------------------------------------
+
+
+def cmd_run(args, dry_run: bool, timeout: int) -> int:
+    body = {"repo": workspace_to_repo(args.workspace),
+            "task": resolve_task_arg(args.task),
+            "timeout_s": timeout}
+    if args.max_revisions is not None:
+        body["max_revisions"] = args.max_revisions
+    if dry_run:
+        dry_run_print("POST", "/run", body)
+        return 0
+    status, payload, raw = send("POST", "/run", body, timeout)
+    if status not in (200, 224, 225):
+        return err_body_exit(status, raw)
+    print(f"[pc] run_id={payload.get('run_id')} verdict={payload.get('verdict')}"
+          f" revisions={payload.get('revisions')}"
+          f" duration={payload.get('duration_s')}s")
+    for f in payload.get("findings") or []:
+        print(f"  [{f.get('severity')}] {f.get('file')}: {f.get('description')}")
+    if payload.get("error"):
+        print(f"pc: {payload['error']}", file=sys.stderr)
+    return {200: EXIT_OK, 224: EXIT_FAIL, 225: EXIT_REVLIMIT}[status]
+
+
+def cmd_plan(args, dry_run: bool, timeout: int) -> int:
+    body = {"repo": workspace_to_repo(args.workspace),
+            "task": resolve_task_arg(args.task),
+            "timeout_s": timeout}
+    if dry_run:
+        dry_run_print("POST", "/plan", body)
+        return 0
+    status, payload, raw = send("POST", "/plan", body, timeout)
+    if status != 200:
+        return err_body_exit(status, raw)
+    if args.out:
+        Path(args.out).write_text(payload.get("spec_text") or "")
+        print(f"[pc] spec written: {args.out}"
+              f" (run_id={payload.get('run_id')},"
+              f" server copy: {payload.get('spec_path')})", file=sys.stderr)
+    else:
+        print(payload.get("spec_text") or "")
+    return EXIT_OK
+
+
+def cmd_doctor(dry_run: bool) -> int:
+    if dry_run:
+        dry_run_print("POST", "/doctor", {})
+        return 0
+    status, payload, raw = send("POST", "/doctor", {}, 60)
+    if status != 200:
+        return err_body_exit(status, raw)
+    print(f"harness pin: {payload.get('harness')}")
+    for name, state in (payload.get("keys") or {}).items():
+        print(f"  {name}: {state}")
+    print(f"records: {payload.get('records')} runs")
+    return EXIT_OK if payload.get("ok") else EXIT_INFRA
+
+
+def cmd_show(args, dry_run: bool) -> int:
+    if dry_run:
+        dry_run_print("POST", "/show", {"run_id": args.run_id})
+        return 0
+    status, payload, raw = send("POST", "/show", {"run_id": args.run_id}, 60)
+    if status != 200:
+        return err_body_exit(status, raw)
+    print(json.dumps(payload, indent=2, default=str))
+    return EXIT_OK
+
+
+# --- main -----------------------------------------------------------------------
+
+def main() -> int:
+    argv = sys.argv[1:]
+    dry_run = False
+    timeout = DEFAULT_TIMEOUT
+    while argv:
+        a = argv[0]
+        if a == "--dry-run":
+            dry_run = True
+        elif a == "--timeout":
+            if len(argv) < 2 or not argv[1].isdigit() or int(argv[1]) < 1:
+                die("--timeout requires a positive integer (seconds)")
+            timeout = int(argv[1])
+            argv = argv[1:]
+        elif a in ("-h", "--help"):
+            usage()
+        else:
+            break
+        argv = argv[1:]
+
+    if not argv or argv[0] not in ("run", "plan", "doctor", "show"):
+        usage()
+    sub = argv[0]
+
+    ap = argparse.ArgumentParser(prog=f"pc {sub}")
+    if sub in ("run", "plan"):
+        ap.add_argument("--workspace", required=True,
+                        help="repo under /work (/work/<repo> or bare <repo>)")
+        ap.add_argument("--task", required=True,
+                        help="inline text, '-' for stdin, or a /work-relative file path")
+    if sub == "run":
+        ap.add_argument("--max-revisions", type=int, default=None)
+    if sub == "plan":
+        ap.add_argument("--out", default=None,
+                        help="write the returned spec here (client-side)")
+    if sub == "show":
+        ap.add_argument("run_id")
+    args = ap.parse_args(argv[1:])
+
+    if sub == "run":
+        return cmd_run(args, dry_run, timeout)
+    if sub == "plan":
+        return cmd_plan(args, dry_run, timeout)
+    if sub == "doctor":
+        return cmd_doctor(dry_run)
+    return cmd_show(args, dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

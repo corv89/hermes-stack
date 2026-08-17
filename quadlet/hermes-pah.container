@@ -1,0 +1,24 @@
+[Unit]
+Description=PAH service (in-process PAH execution for the webui)
+
+[Container]
+ContainerName=hermes-pah
+Image=localhost/hermes-pah:latest
+Network=hermesnet.network
+Environment=PAH_TOKEN={{PAH_TOKEN}}
+Environment=GLM_API_KEY={{GLM_API_KEY}}
+Environment=ALIBABA_TOKEN_PLAN_API_KEY={{ALIBABA_TOKEN_PLAN_API_KEY}}
+# Same host tree the OC server mounts — rw this time: delegated tasks write
+# sibling repos (accepted stage-1 trade, see the spec's Security section).
+Volume={{PROJECT_MOUNT}}:/work:rw,Z
+# Run records (records.jsonl) — the same named volume scripts/pc's runner uses.
+Volume=pah-runs:/opt/pah-driver/runs
+# No PublishPort (hermesnet-internal only), no socket mounts, no User/UserNS
+# lines — the opencode-server precedent: in-container root under the default
+# rootless userns (= host uid 1000).
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
