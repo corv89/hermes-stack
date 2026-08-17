@@ -18,10 +18,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Hermes Agent (non-interactive, skip setup wizard)
-# Pinned hermes-agent commit (2026-08-17, proven-good install): upstream
-# main currently has a stale uv.lock breaking `uv sync --locked`. To
-# refresh: verify upstream main builds, resolve new full SHA, update here.
-RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --commit cbc1054e2387c51b51f128b24a507481dc5b221d
+# Cached installer (served artifact, not in repo — nothing to pin
+# upstream). sha256 0582d9b1…b09b, fetched 2026-08-17. Refresh: curl the
+# URL, re-review, replace file, update hash here.
+# Commit pin: v0.20.2 release cut (2026-08-16); upstream main has a
+# stale uv.lock (pyproject changed post-cut, lock not bumped).
+COPY install-cached.sh /tmp/install.sh
+RUN bash /tmp/install.sh --skip-setup --commit df4b65147d7ddd74dd449f9067aabbca5aef0ec7
 
 # Symlink the agent into a path the webui init already searches.
 RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
