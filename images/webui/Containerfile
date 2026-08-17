@@ -5,6 +5,13 @@ LABEL description="Hermes WebUI + Hermes Agent + opencode2 thin client"
 
 USER root
 
+# Preinstall libatomic1: install.sh's managed Node 26 cannot start
+# without libatomic.so.1 on minimal Debian (upstream #87460, fix
+# #87467 still open). Keep until install.sh handles it itself.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Hermes Agent (non-interactive, skip setup wizard)
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
 
