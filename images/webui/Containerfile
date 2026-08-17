@@ -19,8 +19,11 @@ RUN apt-get update \
 
 # Install Hermes Agent (non-interactive, skip setup wizard)
 # Cached installer (served artifact, not in repo — nothing to pin
-# upstream). sha256 0582d9b1…b09b, fetched 2026-08-17. Refresh: curl the
-# URL, re-review, replace file, update hash here.
+# upstream), patched: uv sync --frozen instead of --locked (installer's
+# UV_NO_CONFIG=1 strips [tool.uv] exclude-newer; --locked then always
+# fails on locks cut with exclude-newer). Validated on uv 0.11.31/0.12.5.
+# sha256 af76176d…c5109, fetched+patched 2026-08-17. Refresh: curl URL,
+# re-apply the --frozen patch, re-review, replace file, update hash.
 # Commit pin: v0.20.2 release cut (2026-08-16); upstream main has a
 # stale uv.lock (pyproject changed post-cut, lock not bumped).
 COPY images/webui/install-cached.sh /tmp/install.sh
