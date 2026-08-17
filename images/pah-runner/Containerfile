@@ -22,7 +22,8 @@ RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /tmp
 # never edit the vendored file, re-copy from the source). Pinned against the
 # proven venv that produced requirements.txt (pydantic-ai-harness==0.21.0).
 # Provenance lives here, not in the vendored file itself.
-COPY images/pah-driver/pah.py /opt/pah-driver/pah.py
+# --chmod=644: source file is 600, COPY preserves mode, entrypoint runs as non-root uid 1000.
+COPY --chmod=644 images/pah-driver/pah.py /opt/pah-driver/pah.py
 
 # Non-root; home exists but stays empty — nothing is mounted there, so no
 # ~/.hermes is ever created inside the container (the whole point).
