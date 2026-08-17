@@ -1,14 +1,14 @@
 [Unit]
-Description=llama.cpp embeddings - Qwen3-Embedding-4B (ROCm on R9700) [Vega transition]
+Description=llama.cpp embeddings - Qwen3-Embedding-4B (ROCm on RX 9070 XT)
 
 [Container]
 ContainerName=hermes-llama-embed
 Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
-# Pin to the R9700 agent (same filter the sidecar used). With the Vega removed
-# there is only one GPU, but the pin is harmless and forward-compatible when
-# the 9070 XT arrives.
-Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX}}
+# Pin to the RX 9070 XT (device_id 0x7550) via its KFD agent index, resolved
+# by device_id in run.py. Keeps embed/rerank off the R9700, which the MoE
+# sidecar needs for its 32GB VRAM.
+Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX_AUX}}
 # Full /dev/dri required: the ROCm runtime fails agent/node mapping when only
 # the render node is passed (verified on the sidecar).
 AddDevice=/dev/kfd

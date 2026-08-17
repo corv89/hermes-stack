@@ -7,7 +7,7 @@
 # the original image (llama.cpp commit 0cea362, built 2026-07-24).
 #
 # GPU:   AMD Radeon AI PRO R9700 (32GB VRAM, gfx1201/RDNA4)
-# Model: Qwen 3.6 35B-A3B MoE UD Q4_K_XL (~21GB), 3B active params
+# Model: Qwen3.8-27B-UD-Q5_K_XL dense (vision), ~21 GB incl. mmproj
 # ROCm:  7.2.1 (official rocm/dev-ubuntu-24.04:7.2.1-complete base)
 #
 # Build (repo root):
@@ -19,7 +19,7 @@
 
 ARG ROCM_VERSION=7.2.1
 # llama.cpp revision to build — pinned for reproducibility; bump deliberately.
-ARG LLAMA_REV=74ce15741b420b8d6f12e720398458b576c51c2c
+ARG LLAMA_REV=9d57ce456c94d241dde672b2db9cf18879766568
 
 # --- Builder stage ---
 FROM docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete AS builder
@@ -78,13 +78,20 @@ RUN mkdir -p /models
 
 EXPOSE 8090
 
-ENV MODEL_PATH=/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
-# Unified KV pool shared by all slots (kv_unified): 64K total cells. Hermes
-# refuses models with <64K context, and the model's trained window is 256K,
-# so 64K is honest headroom, not an exaggeration.
-ENV CTX_SIZE=65536
-# Quantized KV cache: f16 KV for a 64K pool would need ~13-17GB VRAM on top
-# of the ~18GB weights; q8_0 roughly halves that at negligible quality cost.
+ENV MODEL_PATH=/models/Qwen3.8-27B-UD-Q5_K_XL.gguf
+# Native vision encoder (Qwen3.8 is a native VLM). Set MMPROJ_PATH empty to
+# omit the flag and run text-only.
+ENV MMPROJ_PATH=/models/mmproj-F16.gguf
+# Total context pool divided across NP slots: 262144 / 2 = 131072 (128K)
+# per slot — enough for light local coding work alongside Sourcebot phases
+# running in parallel. Two slots cover the real contention pattern
+# (Hermes + Sourcebot). Dense hybrid GDN: only 16/64 layers hold KV
+# → ~4.3 GB at q4_0.
+ENV CTX_SIZE=262144
+# 2 parallel slots; continuous batching keeps one model copy shared by all.
+ENV NP=2
+# Quantized KV cache: f16 KV for the 262144-token pool needs ~17 GB on this
+# GDN hybrid (16/64 KV layers); q4_0 cuts it to ~4.3 GB at negligible cost.
 ENV CACHE_TYPE_K=q4_0
 ENV CACHE_TYPE_V=q4_0
 ENV N_GPU_LAYERS=999
@@ -92,18 +99,22 @@ ENV HOST=0.0.0.0
 ENV PORT=8090
 # Clean model id for OpenAI-compatible clients (else the raw GGUF path is
 # served). Hermes references the model by this name (see run.py config).
-ENV MODEL_ALIAS=qwen3.6-35b-a3b
+ENV MODEL_ALIAS=qwen3.8-27b
 # Thinking-model handling: auto = detect <think> tags and route them to
 # reasoning_content (Thinking ON). Set REASONING_FORMAT=none to disable
 # thinking and send all tokens to content (faster, weaker reasoning).
 ENV REASONING_FORMAT=auto
 
+# MTP flags intentionally NOT added: Qwen3.8 ships MTP-trained, but the GGUF
+# here is not an MTP-UD variant; verify a future MTP-UD release separately.
 CMD ["sh", "-c", "llama-server \
   -m ${MODEL_PATH} \
+  ${MMPROJ_PATH:+--mmproj ${MMPROJ_PATH}} \
   --host ${HOST} \
   --port ${PORT} \
   -ngl ${N_GPU_LAYERS} \
   -c ${CTX_SIZE} \
+  -np ${NP} \
   -t 4 \
   --cont-batching \
   --alias ${MODEL_ALIAS} \

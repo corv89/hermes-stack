@@ -17,6 +17,8 @@ Metrics exposed (per AMD GPU, labeled by PCI address + card name):
   amd_gpu_gpu_clock_mhz        — GPU clock
   amd_gpu_mem_clock_mhz        — memory clock
   amd_gpu_fan_percent          — fan duty cycle (0-100)
+  amd_gpu_rebar_optimal        — Resizable BAR engaged (1) or not (0)
+  amd_gpu_bar_bytes            — largest PCI BAR size (bytes)
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SYSFS_BASE = os.environ.get("GPU_SYSFS_PATH", "/host/sys/class/drm")
+PCI_SYSFS = os.environ.get("GPU_PCI_SYSFS_PATH", "/host/sys/bus/pci/devices")
 PORT = int(os.environ.get("GPU_EXPORTER_PORT", "9101"))
 
 
@@ -43,23 +46,48 @@ def read_str(path: str) -> str | None:
         return None
 
 
+def largest_bar_bytes(pci_addr: str) -> int | None:
+    """Largest PCI BAR (bytes) for a GPU, read from sysfs `resource`. With
+    Resizable BAR engaged this is the full VRAM; otherwise the legacy 256 MiB
+    aperture. Returns None if the BAR can't be read."""
+    try:
+        max_bar = 0
+        with open(f"{PCI_SYSFS}/{pci_addr}/resource") as fh:
+            for n, line in enumerate(fh):
+                if n >= 7:  # first 7 lines are BAR0..BAR6
+                    break
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                start, end = int(parts[0], 16), int(parts[1], 16)
+                if start and end > start:
+                    max_bar = max(max_bar, end - start + 1)
+        return max_bar or None
+    except IOError:
+        return None
+
+
 def find_amd_gpus() -> list[dict]:
     """Enumerate AMD GPU devices under /sys/class/drm/."""
     gpus = []
-    for device_path in sorted(glob.glob(f"{SYSFS_BASE}/card[0-9]*/device")):
+    for entry in sorted(glob.glob(f"{SYSFS_BASE}/card[0-9]*")):
+        if not re.match(r"card\d+$", entry.rsplit("/", 1)[-1]):
+            continue
+        device_path = f"{entry}/device"
         vendor = read_str(f"{device_path}/vendor")
         if vendor != "0x1002":
             continue
-        real = os.path.realpath(device_path)
-        pci_match = re.search(r"(0000:[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+)", real)
-        pci_addr = pci_match.group(1) if pci_match else "unknown"
-        card_name = device_path.split("/")[-2]
+        pci_addr = os.path.basename(os.path.realpath(device_path))
+        if not re.match(r"0000:[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+", pci_addr):
+            pci_addr = "unknown"
+        card_name = entry.rsplit("/", 1)[-1]
         hwmons = sorted(glob.glob(f"{device_path}/hwmon/hwmon*"))
         gpus.append({
             "path": device_path,
             "pci": pci_addr,
             "card": card_name,
             "hwmon": hwmons[0] if hwmons else None,
+            "bar": largest_bar_bytes(pci_addr),
         })
     return gpus
 
@@ -105,6 +133,14 @@ def collect_metrics() -> str:
             emit("amd_gpu_fan_percent", "Fan duty cycle (0-100)", "gauge",
                  [(lbl, v / 255 * 100)] if (v := read_int(f"{h}/pwm1")) is not None else [])
 
+        bar = gpu.get("bar")
+        if bar is not None:
+            emit("amd_gpu_bar_bytes", "Largest PCI BAR size (bytes)", "gauge",
+                 [(lbl, bar)])
+            emit("amd_gpu_rebar_optimal",
+                 "Resizable BAR engaged (1=yes, 0=no; optimal when largest BAR >= 1GiB)",
+                 "gauge", [(lbl, 1.0 if bar >= (1 << 30) else 0.0)])
+
     return "\n".join(lines) + "\n"
 
 
@@ -130,4 +166,12 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"AMD GPU metrics exporter on :{PORT} (sysfs: {SYSFS_BASE})", flush=True)
+    for gpu in find_amd_gpus():
+        bar = gpu.get("bar")
+        if bar is not None and bar < (1 << 30):
+            print(f"WARN: GPU {gpu['pci']} ({gpu['card']}) Resizable BAR not "
+                  f"engaged (largest BAR {bar // (1 << 20)} MiB) — model "
+                  f"load/unload is slower; steady inference is unaffected "
+                  f"while the model fits in VRAM. Enable Above 4G Decoding + "
+                  f"Re-Size BAR in BIOS", flush=True)
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

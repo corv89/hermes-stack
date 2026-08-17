@@ -1,11 +1,12 @@
 [Unit]
-Description=llama.cpp reranker - Qwen3-Reranker-4B (ROCm on R9700) [Vega transition]
+Description=llama.cpp reranker - Qwen3-Reranker-4B (ROCm on RX 9070 XT)
 
 [Container]
 ContainerName=hermes-llama-rerank
 Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
-Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX}}
+# Pin to the RX 9070 XT (device_id 0x7550); see hermes-llama-embed.container.
+Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX_AUX}}
 AddDevice=/dev/kfd
 AddDevice=/dev/dri
 GroupAdd=video

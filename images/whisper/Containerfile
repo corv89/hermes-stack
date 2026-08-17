@@ -71,6 +71,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy all build artifacts (binaries + shared libs).
 COPY --from=builder /app/build/bin /opt/whisper.cpp/bin
 ENV PATH=/opt/whisper.cpp/bin:$PATH
+# whisper-server links libwhisper/libggml and ggml dlopens the Vulkan backend,
+# all shipped in /opt/whisper.cpp/bin — tell the linker to search there.
+ENV LD_LIBRARY_PATH=/opt/whisper.cpp/bin
 
 RUN mkdir -p /models
 EXPOSE 8086

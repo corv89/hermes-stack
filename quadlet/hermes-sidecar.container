@@ -1,22 +1,26 @@
 [Unit]
-Description=llama.cpp sidecar - Qwen3.6-35B-A3B MoE (ROCm on R9700)
+Description=llama.cpp sidecar - Qwen3.8-27B dense VLM (ROCm on R9700)
 
 [Container]
 ContainerName=hermes-sidecar
 Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
-Environment=MODEL_PATH=/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
-# 64K context (Hermes gates on a 64K minimum). MoE has 3B active params
-# (fast decode); Q4 KV cache keeps VRAM within budget (~21GB weights + KV)
-# alongside embed/rerank on the same GPU.
-Environment=CTX_SIZE=65536
+Environment=MODEL_PATH=/models/Qwen3.8-27B-UD-Q5_K_XL.gguf
+Environment=MMPROJ_PATH=/models/mmproj-F16.gguf
+# Total context pool ÷ 2 slots = 128K per slot — enough for light local
+# coding alongside Sourcebot phases running in parallel. Two slots cover
+# the real contention pattern (Hermes + Sourcebot). Dense GDN hybrid
+# keeps KV small.
+# embed/rerank run on the 9070 XT, so the R9700 is the sidecar's alone.
+Environment=CTX_SIZE=262144
+Environment=NP=2
 Environment=CACHE_TYPE_K=q4_0
 Environment=CACHE_TYPE_V=q4_0
-# Pin ROCm to the R9700 agent: a ROCm runtime supports only one GPU
-# generation and llama.cpp HIP init aborts if it also sees the Vega.
-# (HIP_VISIBLE_DEVICES must NOT be set too - after the ROCR filter the
-# R9700 is device 0, so a second filter selects nothing.)
-Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX}}
+# Pin ROCm to the R9700 (device_id 0x7551) via its KFD agent index. Both
+# GPUs are gfx1201, so the index is resolved by device_id in run.py (not by
+# generation). Do NOT set HIP_VISIBLE_DEVICES too: after the ROCR filter the
+# R9700 is device 0, so a second filter selects nothing.
+Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX_SIDECAR}}
 Volume={{HOME}}/models:/models:ro
 # Full /dev/dri is required: the ROCm runtime fails agent/node mapping
 # when only the R9700 render node is passed (verified).
