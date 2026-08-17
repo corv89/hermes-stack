@@ -21,6 +21,14 @@ the server never writes outside /work and the records volume.
 --dry-run prints method, URL and JSON body (task text truncated, token
 redacted) without sending anything.
 
+Live tasks: pc run / pc plan print the server-minted task_id to stderr
+line 1 as soon as it exists — a second terminal can run
+`pc status <task_id> --follow` immediately. pc tasks lists the registry;
+pc cancel SIGTERMs a stuck task. On a client-side HTTP timeout pc NEVER
+auto-retries: the task may still be running server-side, and a re-dispatch
+would clobber the same working tree — it prints the task_id and a follow
+hint instead. Re-dispatch is a deliberate human (or Hermes) decision.
+
 Exit codes restore pah.py's own 0/1/2/3 contract: 200→0 (doctor reports 3
 when a key is MISSING, as pah doctor does), 224→1 fail-verdict, 225→2
 revision-limit, any other 4xx/5xx→3. Error response bodies print to stderr
@@ -33,7 +41,10 @@ Env:
 import argparse
 import json
 import os
+import socket
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -48,7 +59,10 @@ USAGE = """usage: pc [--dry-run] [--timeout N] <pah-args...>
   e.g. pc run --workspace /work/repo --task -
        pc plan --workspace /work/repo --task - --out /work/spec.md
        pc doctor
-       pc show <run-id>"""
+       pc show <run-id>
+       pc tasks
+       pc status <task-id> [--follow]
+       pc cancel <task-id>"""
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -92,18 +106,22 @@ def resolve_task_arg(value: str) -> str:
     return value
 
 
-def send(method: str, path: str, body: dict, timeout: int):
-    """POST JSON with the token header. Returns (status, parsed, raw);
-    exits 3 on connection failure (service down = infra)."""
+def send(method: str, path: str, body: dict | None, timeout: int,
+         raise_timeout: bool = False):
+    """Send JSON with the token header. Returns (status, parsed, raw);
+    exits 3 on connection failure (service down = infra). Read timeouts
+    exit 3 too — unless raise_timeout (dispatch needs the distinction to
+    print the task is likely still alive)."""
     base = os.environ.get("PC_URL", DEFAULT_URL).rstrip("/")
     token = os.environ.get("PAH_TOKEN", "")
     if not token:
         die("PAH_TOKEN not set (the webui quadlet injects it)")
     url = base + path
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                 method=method)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
     req.add_header("X-PAH-Token", token)
-    req.add_header("Content-Type", "application/json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout + GRACE_S) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -114,6 +132,11 @@ def send(method: str, path: str, body: dict, timeout: int):
             return e.code, json.loads(raw), raw
         except json.JSONDecodeError:
             return e.code, {}, raw
+    except (TimeoutError, socket.timeout):
+        if raise_timeout:
+            raise
+        print(f"pc: HTTP timeout on {url}", file=sys.stderr)
+        sys.exit(EXIT_INFRA)
     except urllib.error.URLError as e:
         print(f"pc: cannot reach {url}: {e.reason}", file=sys.stderr)
         sys.exit(EXIT_INFRA)
@@ -139,6 +162,89 @@ def err_body_exit(status: int, raw: str) -> int:
     return EXIT_INFRA
 
 
+# --- dispatch + live-task discovery --------------------------------------------
+
+
+def fetch_tasks(quiet: bool = False, timeout: int = 15) -> list:
+    """GET /tasks → the list; quiet swallows failures (discovery polls)."""
+    try:
+        status, payload, _raw = send("GET", "/tasks", None, timeout)
+    except SystemExit:
+        if quiet:
+            return []
+        raise
+    if status != 200:
+        if quiet:
+            return []
+        die(f"GET /tasks failed: HTTP {status}")
+    return payload.get("tasks") or []
+
+
+def dispatch(method: str, path: str, kind: str, body: dict, timeout: int):
+    """POST a /run or /plan in a worker thread while watching GET /tasks
+    for the server-minted task_id, so it lands on stderr line 1 within
+    ~1s of dispatch — a second terminal can `pc status <id> --follow`
+    immediately, and a client timeout still has an id to point at.
+    NEVER retries. Returns (status, payload, raw, task_id, socket_timeout)."""
+    before = {t.get("task_id") for t in fetch_tasks(quiet=True)}
+    box: dict = {}
+
+    def worker():
+        try:
+            box["res"] = send(method, path, body, timeout, raise_timeout=True)
+        except SystemExit as e:
+            box["dead"] = e.code
+        except (TimeoutError, socket.timeout):
+            box["timeout"] = True
+
+    th = threading.Thread(target=worker, daemon=True)
+    th.start()
+    task_id = None
+    give_up = time.monotonic() + 30
+    while (th.is_alive() and task_id is None
+           and time.monotonic() < give_up):
+        time.sleep(0.5)
+        for t in fetch_tasks(quiet=True):
+            if (t.get("task_id") and t.get("task_id") not in before
+                    and t.get("repo") == body.get("repo")
+                    and t.get("kind") == kind):
+                task_id = t["task_id"]
+                break
+    if task_id is not None:
+        print(task_id, file=sys.stderr)  # stderr line 1: the live task_id
+    th.join()
+    if "res" in box:
+        status, payload, raw = box["res"]
+        if (task_id is not None and payload.get("task_id")
+                and payload["task_id"] != task_id):
+            print(f"[pc] task_id={payload['task_id']}", file=sys.stderr)
+        return status, payload, raw, (payload.get("task_id") or task_id), False
+    if box.get("timeout"):
+        return 0, {}, "", task_id, True
+    sys.exit(box.get("dead") or EXIT_INFRA)
+
+
+def timeout_hint(task_id, timeout: int) -> int:
+    """Client timeout ≠ task death: the request may still be running
+    server-side. NEVER auto-retry — a re-dispatch would clobber the same
+    working tree; point the human at the task instead."""
+    where = (f"follow it with: pc status {task_id} --follow" if task_id
+             else "list running tasks with: pc tasks")
+    print(f"pc: HTTP timeout after {timeout + GRACE_S}s — the task may "
+          f"still be running; {where}", file=sys.stderr)
+    return EXIT_INFRA
+
+
+def busy_hint(payload: dict, raw: str) -> int:
+    if raw:
+        print(raw, file=sys.stderr)
+    holder = payload.get("task_id")
+    if holder:
+        print(f"pc: repo busy — follow with: pc status {holder} --follow "
+              f"(or stop it: pc cancel {holder})", file=sys.stderr)
+    return EXIT_INFRA
+
+
 # --- subcommands ---------------------------------------------------------------
 
 
@@ -151,7 +257,12 @@ def cmd_run(args, dry_run: bool, timeout: int) -> int:
     if dry_run:
         dry_run_print("POST", "/run", body)
         return 0
-    status, payload, raw = send("POST", "/run", body, timeout)
+    status, payload, raw, _tid, timed_out = dispatch(
+        "POST", "/run", "run", body, timeout)
+    if timed_out:
+        return timeout_hint(_tid, timeout)
+    if status == 409:
+        return busy_hint(payload, raw)
     if status not in (200, 224, 225):
         return err_body_exit(status, raw)
     print(f"[pc] run_id={payload.get('run_id')} verdict={payload.get('verdict')}"
@@ -171,7 +282,12 @@ def cmd_plan(args, dry_run: bool, timeout: int) -> int:
     if dry_run:
         dry_run_print("POST", "/plan", body)
         return 0
-    status, payload, raw = send("POST", "/plan", body, timeout)
+    status, payload, raw, _tid, timed_out = dispatch(
+        "POST", "/plan", "plan", body, timeout)
+    if timed_out:
+        return timeout_hint(_tid, timeout)
+    if status == 409:
+        return busy_hint(payload, raw)
     if status != 200:
         return err_body_exit(status, raw)
     if args.out:
@@ -209,6 +325,110 @@ def cmd_show(args, dry_run: bool) -> int:
     return EXIT_OK
 
 
+def cmd_tasks(dry_run: bool) -> int:
+    if dry_run:
+        dry_run_print("GET", "/tasks", {})
+        return 0
+    items = fetch_tasks()
+    if not items:
+        print("no tasks")
+        return EXIT_OK
+    fmt = "{:<32} {:<5} {:<9} {:>4} {:>8} {:<21} {}"
+    print(fmt.format("task_id", "kind", "status", "exit", "age_s",
+                     "run_id", "repo"))
+    for t in items:
+        exit_code = t.get("exit_code")
+        age = t.get("age_s")
+        print(fmt.format(t.get("task_id") or "-",
+                         t.get("kind") or "-",
+                         t.get("status") or "-",
+                         "-" if exit_code is None else str(exit_code),
+                         "-" if age is None else str(age),
+                         t.get("run_id") or "-",
+                         t.get("repo") or "-"))
+    return EXIT_OK
+
+
+def print_status(payload: dict) -> None:
+    print(f"task_id:    {payload.get('task_id')}")
+    print(f"kind:       {payload.get('kind')}")
+    print(f"repo:       {payload.get('repo')}")
+    print(f"status:     {payload.get('status')}"
+          f"  exit_code: {payload.get('exit_code')}")
+    print(f"run_id:     {payload.get('run_id') or '-'}"
+          f"  age_s: {payload.get('age_s')}")
+    print("last_lines:")
+    for ln in payload.get("last_lines") or []:
+        print(f"  {ln}")
+
+
+def status_exit(payload: dict) -> int:
+    if payload.get("status") == "running":
+        return EXIT_OK
+    if payload.get("status") == "done":
+        return {0: EXIT_OK, 1: EXIT_FAIL, 2: EXIT_REVLIMIT}.get(
+            payload.get("exit_code"), EXIT_INFRA)
+    return EXIT_INFRA
+
+
+def new_lines(lines: list, seen) -> list:
+    """Lines after the last one printed; if that line already rotated out
+    of the server's 50-line ring, everything counts as new."""
+    if seen is None:
+        return list(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i] == seen:
+            return lines[i + 1:]
+    return list(lines)
+
+
+def cmd_status(args, dry_run: bool) -> int:
+    path = f"/status/{args.task_id}"
+    if dry_run:
+        dry_run_print("GET", path, {})
+        return 0
+    status, payload, raw = send("GET", path, None, 30)
+    if status != 200:
+        return err_body_exit(status, raw)
+    print_status(payload)
+    if not args.follow:
+        if payload.get("status") == "running":
+            print(f"[pc] still running — follow with: "
+                  f"pc status {args.task_id} --follow")
+        return status_exit(payload)
+    lines = payload.get("last_lines") or []
+    seen = lines[-1] if lines else None
+    while payload.get("status") == "running":
+        time.sleep(5)
+        status, payload, raw = send("GET", path, None, 30)
+        if status != 200:
+            return err_body_exit(status, raw)
+        lines = payload.get("last_lines") or []
+        fresh = new_lines(lines, seen)
+        if seen is not None and fresh and seen not in lines:
+            print("[pc] tail advanced past the 50-line window; "
+                  "showing current tail")
+        for ln in fresh:
+            print(ln)
+        if lines:
+            seen = lines[-1]
+    print(f"[pc] final: {payload.get('status')}"
+          f" exit_code={payload.get('exit_code')}")
+    return status_exit(payload)
+
+
+def cmd_cancel(args, dry_run: bool) -> int:
+    path = f"/cancel/{args.task_id}"
+    if dry_run:
+        dry_run_print("POST", path, {})
+        return 0
+    status, payload, raw = send("POST", path, None, 30)
+    if status != 200:
+        return err_body_exit(status, raw)
+    print(f"[pc] task {payload.get('task_id')}: {payload.get('status')}")
+    return EXIT_OK
+
+
 # --- main -----------------------------------------------------------------------
 
 def main() -> int:
@@ -230,7 +450,8 @@ def main() -> int:
             break
         argv = argv[1:]
 
-    if not argv or argv[0] not in ("run", "plan", "doctor", "show"):
+    if not argv or argv[0] not in ("run", "plan", "doctor", "show",
+                                   "tasks", "status", "cancel"):
         usage()
     sub = argv[0]
 
@@ -247,6 +468,13 @@ def main() -> int:
                         help="write the returned spec here (client-side)")
     if sub == "show":
         ap.add_argument("run_id")
+    if sub == "status":
+        ap.add_argument("task_id")
+        ap.add_argument("--follow", action="store_true",
+                        help="poll every 5s, print only new lines, until the "
+                             "task leaves `running`")
+    if sub == "cancel":
+        ap.add_argument("task_id")
     args = ap.parse_args(argv[1:])
 
     if sub == "run":
@@ -255,7 +483,13 @@ def main() -> int:
         return cmd_plan(args, dry_run, timeout)
     if sub == "doctor":
         return cmd_doctor(dry_run)
-    return cmd_show(args, dry_run)
+    if sub == "show":
+        return cmd_show(args, dry_run)
+    if sub == "tasks":
+        return cmd_tasks(dry_run)
+    if sub == "status":
+        return cmd_status(args, dry_run)
+    return cmd_cancel(args, dry_run)
 
 
 if __name__ == "__main__":

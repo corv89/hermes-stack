@@ -13,19 +13,31 @@ passed to the driver as absolute /work/<repo> paths, so record fields
 translation layer exists to get wrong.
 
 Routes — ALL require the X-PAH-Token header (hmac-compared to PAH_TOKEN):
-  GET  /healthz  {"status": "ok", "harness": <driver pin>, "records": N}
-  POST /run      {repo, task, max_revisions?, timeout_s?} → pipeline verdict
-  POST /plan     {repo, task, timeout_s?}                  → spec text
-  POST /doctor   → per-key status (never key material)
-  POST /show     {run_id} → the stored run record, verbatim
+  GET  /healthz          {"status": "ok", "harness": <driver pin>, "records": N}
+  POST /run              {repo, task, max_revisions?, timeout_s?} → pipeline verdict
+  POST /plan             {repo, task, timeout_s?}                  → spec text
+  POST /doctor           → per-key status (never key material)
+  POST /show             {run_id} → the stored run record, verbatim
+  GET  /tasks            → live task-registry summaries
+  GET  /status/{task_id} → one task entry incl. its stdout tail (sk- redacted)
+  POST /cancel/{task_id} → SIGTERM the task's process group; mark cancelled
 
 Exit→HTTP: 200 pass, 224 fail-verdict, 225 revision-limit, 400 validation,
-500 infra (driver exit 3 / timeout / spawn failure). Responses never
-include env or key material.
+409 repo busy (per-repo lock), 500 infra (driver exit 3 / timeout / spawn
+failure). Responses never include env or key material.
 
-Concurrency: simultaneous tasks are simultaneous subprocesses — separate
-processes, no shared interpreter state; records.jsonl appends are
-single-write lines, so no queue is needed at task cadence.
+Task registry: every /run and /plan mints a task_id and streams the
+driver's stdout line-by-line into a bounded tail (deque, 50 lines) so a
+caller can poll progress during AND after the run (GET /tasks,
+GET /status/{task_id}). The registry is a live view only — records.jsonl
+stays the durable log.
+
+Concurrency: one repo, one task — /run and /plan claim the repo
+(resolved-path key) atomically; a second request while one runs gets 409
+{"error": "repo busy", "task_id": <running>}. Different repos run in
+parallel as subprocesses in their own process groups. Locks are in-memory
+(container lifetime); a restart clears them, which is safe because the
+subprocess dies with the container.
 """
 from __future__ import annotations
 
@@ -35,7 +47,11 @@ import hmac
 import json
 import os
 import re
+import signal
+import threading
 import time
+import uuid
+from collections import deque
 from pathlib import Path, PurePosixPath
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -172,36 +188,225 @@ def find_record(run_id: str) -> dict | None:
     return None
 
 
+# --- task registry (live view; records.jsonl stays the durable log) ------------
+
+MAX_TAIL_LINES = 50
+MAX_FINISHED_TASKS = 100
+KEY_PREFIXES = ("sk-",)
+
+REGISTRY_LOCK = threading.Lock()
+TASKS: dict[str, dict] = {}
+
+
+class RepoBusy(Exception):
+    """The repo already has a running task (→ HTTP 409 repo busy)."""
+
+    def __init__(self, holder_task_id: str):
+        super().__init__(holder_task_id)
+        self.holder = holder_task_id
+
+
+def redacted(lines) -> list[str]:
+    """Defense in depth: drop any line carrying a key prefix before it is
+    returned to a caller. pah.py never prints keys; this guard exists so
+    the registry cannot become a leak channel if that ever changes."""
+    return [ln for ln in lines if not any(p in ln for p in KEY_PREFIXES)]
+
+
+def _register_task(kind: str, repo: str, repo_path: str) -> tuple[str, str | None]:
+    """Atomically mint a registry entry and claim repo_path. The claim IS
+    the per-repo lock: a repo is held exactly while one of its tasks is
+    `running`. Returns (task_id, None) on success, or ("", holder_task_id)
+    when the repo is busy."""
+    with REGISTRY_LOCK:
+        for tid, e in TASKS.items():
+            if e["repo_path"] == repo_path and e["status"] == "running":
+                return "", tid
+        task_id = uuid.uuid4().hex
+        TASKS[task_id] = {
+            "task_id": task_id,
+            "kind": kind,
+            "repo": repo,
+            "repo_path": repo_path,
+            "started_at": time.time(),
+            "status": "running",
+            "exit_code": None,
+            "run_id": None,
+            "last_lines": deque(maxlen=MAX_TAIL_LINES),
+        }
+        return task_id, None
+
+
+def _finish_task(task_id: str, status: str, exit_code: int | None) -> None:
+    """Terminal transition — never overwrites a concurrent /cancel — and
+    prune finished entries to the most recent MAX_FINISHED_TASKS."""
+    with REGISTRY_LOCK:
+        e = TASKS.get(task_id)
+        if e is None or e["status"] != "running":
+            return
+        e["status"] = status
+        e["exit_code"] = exit_code
+        finished = [tid for tid, t in TASKS.items() if t["status"] != "running"]
+        finished.sort(key=lambda tid: TASKS[tid]["started_at"])
+        drop = max(0, len(finished) - MAX_FINISHED_TASKS)
+        for tid in finished[:drop]:
+            TASKS.pop(tid, None)
+
+
+def _task_summary(e: dict) -> dict:
+    return {"task_id": e["task_id"], "kind": e["kind"], "repo": e["repo"],
+            "status": e["status"], "exit_code": e["exit_code"],
+            "age_s": round(time.time() - e["started_at"], 1),
+            "run_id": e["run_id"]}
+
+
+def _task_payload(e: dict) -> dict:
+    """Full /status entry — internal keys (proc, cancelling, repo_path)
+    stay out, and the tail goes through the redaction guard."""
+    d = _task_summary(e)
+    d["started_at"] = round(e["started_at"], 3)
+    d["last_lines"] = redacted(list(e["last_lines"]))
+    return d
+
+
 # --- driver subprocess ---------------------------------------------------------
 
-async def spawn_driver(argv: list[str], task: str, timeout_s: int):
-    """Run the vendored driver: list argv, no shell, cwd=/, task on stdin.
-    Returns (exit_code, stdout, stderr, duration_s, timed_out); exit_code is
-    None when the process could not be spawned at all."""
-    t0 = time.monotonic()
+def _signal_pg(proc, sig: int) -> None:
+    """Signal the subprocess's whole process group (start_new_session ⇒
+    pgid == pid) so driver children die with it. Already-dead is fine."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            str(VENV_PY), str(DRIVER), *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/",
-        )
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def _spawn_driver_proc(argv: list[str]):
+    """Vendored driver as a subprocess: list argv, no shell, cwd=/, task on
+    stdin, OWN process group (start_new_session) so /cancel and timeouts
+    reach the driver's whole tree, not just the python parent."""
+    return asyncio.create_subprocess_exec(
+        str(VENV_PY), str(DRIVER), *argv,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd="/",
+        start_new_session=True,
+    )
+
+
+async def _stream_proc(proc, task: str, timeout_s: int, on_line=None):
+    """Feed the task on stdin, then read stdout line-by-line (each decoded
+    line passed to on_line) with stderr drained concurrently — no bulk
+    communicate(). The whole run is bounded by timeout_s; on timeout the
+    process GROUP is SIGKILLed. Returns (exit_code, stdout, stderr,
+    duration_s, timed_out)."""
+    t0 = time.monotonic()
+    deadline = t0 + timeout_s
+    out_lines: list[str] = []
+    err_b = b""
+    timed_out = False
+    try:
+        proc.stdin.write(task.encode())
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass  # driver already gone — the read loop will see EOF
+    err_task = asyncio.ensure_future(proc.stderr.read())
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), remaining)
+            except asyncio.TimeoutError:
+                timed_out = True
+                break
+            if not raw:
+                break  # stdout EOF — driver is done talking
+            text = raw.decode("utf-8", "replace").rstrip("\n")
+            out_lines.append(text)
+            if on_line is not None:
+                on_line(text)
+        if timed_out:
+            _signal_pg(proc, signal.SIGKILL)
+        try:
+            await asyncio.wait_for(proc.wait(), 15)
+        except asyncio.TimeoutError:
+            pass
+        try:
+            err_b = await asyncio.wait_for(err_task, 15)
+        except asyncio.TimeoutError:
+            err_task.cancel()
+    finally:
+        if not err_task.done():
+            err_task.cancel()
+    return (proc.returncode, "\n".join(out_lines),
+            err_b.decode("utf-8", "replace"), time.monotonic() - t0, timed_out)
+
+
+async def spawn_driver(argv: list[str], task: str, timeout_s: int):
+    """Untracked driver run (doctor). Returns (exit_code, stdout, stderr,
+    duration_s, timed_out); exit_code is None when spawn itself failed."""
+    try:
+        proc = await _spawn_driver_proc(argv)
     except OSError as e:
         return None, "", f"spawn failed: {e}", 0.0, False
+    return await _stream_proc(proc, task, timeout_s)
+
+
+async def execute_tracked(kind: str, repo: str, repo_path: str,
+                          argv: list[str], task: str, timeout_s: int):
+    """Registry-tracked driver run for /run and /plan: mints the task_id,
+    claims the repo (RepoBusy → 409), streams every stdout line into the
+    task tail, parses [<run_id>] markers as they appear, and stays
+    cancellable (POST /cancel SIGTERMs the process group).
+    Returns (task_id, exit_code, stdout, stderr, duration_s, timed_out)."""
+    task_id, holder = _register_task(kind, repo, repo_path)
+    if holder is not None:
+        raise RepoBusy(holder)
+    entry = TASKS[task_id]
+
+    def on_line(text: str) -> None:
+        entry["last_lines"].append(text)
+        m = RUN_ID_RE.search(text)
+        if m and entry["run_id"] is None:
+            entry["run_id"] = m.group(1)
+
     try:
-        out_b, err_b = await asyncio.wait_for(
-            proc.communicate(task.encode()), timeout_s)
-    except asyncio.TimeoutError:
-        proc.kill()
-        try:
-            out_b, err_b = await proc.communicate()
-        except Exception:  # noqa: BLE001
-            out_b, err_b = b"", b""
-        return (proc.returncode, out_b.decode("utf-8", "replace"),
-                err_b.decode("utf-8", "replace"), time.monotonic() - t0, True)
-    return (proc.returncode, out_b.decode("utf-8", "replace"),
-            err_b.decode("utf-8", "replace"), time.monotonic() - t0, False)
+        proc = await _spawn_driver_proc(argv)
+    except OSError as e:
+        _finish_task(task_id, "failed", None)
+        return task_id, None, "", f"spawn failed: {e}", 0.0, False
+    with REGISTRY_LOCK:
+        entry["proc"] = proc
+    try:
+        code, out, err, dur, timed_out = await _stream_proc(
+            proc, task, timeout_s, on_line)
+    except asyncio.CancelledError:  # caller went away — never orphan a repo
+        _signal_pg(proc, signal.SIGKILL)
+        _finish_task(task_id, "failed", None)
+        raise
+    except Exception:  # noqa: BLE001 — same rule: no orphaned lock holders
+        _signal_pg(proc, signal.SIGKILL)
+        _finish_task(task_id, "failed", proc.returncode)
+        raise
+    finally:
+        with REGISTRY_LOCK:
+            entry.pop("proc", None)
+    with REGISTRY_LOCK:
+        cancelling = bool(entry.get("cancelling"))
+        if entry["run_id"] is None:
+            entry["run_id"] = run_id_from(out)
+    if cancelling:
+        _finish_task(task_id, "cancelled", code)
+    elif timed_out:
+        _finish_task(task_id, "timeout", code)
+    elif code in (0, 1, 2):
+        _finish_task(task_id, "done", code)
+    else:
+        _finish_task(task_id, "failed", code)
+    return task_id, code, out, err, dur, timed_out
 
 
 def run_id_from(stdout: str) -> str | None:
@@ -213,12 +418,13 @@ def tail(s: str, n: int = 2000) -> str:
     return s.strip()[-n:]
 
 
-def infra_response(code, run_id, rec, err, out) -> JSONResponse:
+def infra_response(code, run_id, rec, err, out, task_id=None) -> JSONResponse:
     why = ("driver infra error (exit 3)" if code == 3
            else "driver did not run" if code is None
            else f"driver exit {code}")
     return JSONResponse(status_code=500,
-                        content={"error": why, "run_id": run_id,
+                        content={"error": why, "task_id": task_id,
+                                 "run_id": run_id,
                                  "outcome": (rec or {}).get("outcome"),
                                  "stderr_tail": tail(err or out)})
 
@@ -241,18 +447,30 @@ async def run_task(body: RunBody, _: None = Depends(auth)):
     argv = ["run", "--workspace", str(ws), "--task", "-"]
     if body.max_revisions is not None:
         argv += ["--max-revisions", str(body.max_revisions)]
-    code, out, err, dur, timed_out = await spawn_driver(argv, task, timeout_s)
+    try:
+        task_id, code, out, err, dur, timed_out = await execute_tracked(
+            "run", body.repo, str(ws), argv, task, timeout_s)
+    except RepoBusy as busy:
+        return JSONResponse(status_code=409,
+                            content={"error": "repo busy",
+                                     "task_id": busy.holder})
     run_id = run_id_from(out)
     rec = find_record(run_id) if run_id else None
+    if TASKS.get(task_id, {}).get("status") == "cancelled":
+        return JSONResponse(status_code=500,
+                            content={"error": "task cancelled",
+                                     "task_id": task_id, "run_id": run_id})
     if timed_out:
         return JSONResponse(
             status_code=500,
             content={"error": f"driver timed out after {timeout_s}s",
+                     "task_id": task_id,
                      "run_id": run_id, "outcome": (rec or {}).get("outcome"),
                      "stderr_tail": tail(err or out)})
     if code in (0, 1, 2):
         verdict = (rec or {}).get("verdict") or {}
         payload = {
+            "task_id": task_id,
             "run_id": run_id,
             "verdict": verdict.get("verdict"),
             "revisions": (rec or {}).get("revisions"),
@@ -263,7 +481,7 @@ async def run_task(body: RunBody, _: None = Depends(auth)):
             payload["error"] = f"no run record found for {run_id}"
         return JSONResponse(status_code={0: 200, 1: 224, 2: 225}[code],
                             content=payload)
-    return infra_response(code, run_id, rec, err, out)
+    return infra_response(code, run_id, rec, err, out, task_id)
 
 
 @app.post("/plan")
@@ -278,13 +496,24 @@ async def plan_task(body: PlanBody, _: None = Depends(auth)):
     # i.e. the /work root — writable and host-visible; the full text is also
     # returned so callers never need the file.
     argv = ["plan", "--workspace", str(ws), "--task", "-"]
-    code, out, err, dur, timed_out = await spawn_driver(argv, task, timeout_s)
+    try:
+        task_id, code, out, err, dur, timed_out = await execute_tracked(
+            "plan", body.repo, str(ws), argv, task, timeout_s)
+    except RepoBusy as busy:
+        return JSONResponse(status_code=409,
+                            content={"error": "repo busy",
+                                     "task_id": busy.holder})
     run_id = run_id_from(out)
     rec = find_record(run_id) if run_id else None
+    if TASKS.get(task_id, {}).get("status") == "cancelled":
+        return JSONResponse(status_code=500,
+                            content={"error": "task cancelled",
+                                     "task_id": task_id, "run_id": run_id})
     if timed_out:
         return JSONResponse(
             status_code=500,
             content={"error": f"driver timed out after {timeout_s}s",
+                     "task_id": task_id,
                      "run_id": run_id,
                      "stderr_tail": tail(err or out)})
     if code == 0:
@@ -301,12 +530,14 @@ async def plan_task(body: PlanBody, _: None = Depends(auth)):
             return JSONResponse(
                 status_code=500,
                 content={"error": "spec file not found under /work",
+                         "task_id": task_id,
                          "run_id": run_id, "spec_path": spec_path})
         return JSONResponse(status_code=200,
-                            content={"run_id": run_id,
+                            content={"task_id": task_id,
+                                     "run_id": run_id,
                                      "spec_path": str(spec_path),
                                      "spec_text": real.read_text()})
-    return infra_response(code, run_id, rec, err, out)
+    return infra_response(code, run_id, rec, err, out, task_id)
 
 
 @app.post("/doctor")
@@ -335,3 +566,45 @@ async def show(body: ShowBody, _: None = Depends(auth)):
         return JSONResponse(status_code=404,
                             content={"error": f"no record {body.run_id}"})
     return JSONResponse(status_code=200, content=rec)
+
+
+@app.get("/tasks")
+async def tasks(_: None = Depends(auth)) -> dict:
+    with REGISTRY_LOCK:
+        items = [_task_summary(e) for _, e in
+                 sorted(TASKS.items(), key=lambda kv: kv[1]["started_at"])]
+    return {"tasks": items}
+
+
+@app.get("/status/{task_id}")
+async def task_status(task_id: str, _: None = Depends(auth)):
+    with REGISTRY_LOCK:
+        entry = TASKS.get(task_id)
+        payload = None if entry is None else _task_payload(entry)
+    if payload is None:
+        return JSONResponse(status_code=404,
+                            content={"error": f"no task {task_id}"})
+    return JSONResponse(status_code=200, content=payload)
+
+
+@app.post("/cancel/{task_id}")
+async def cancel_task(task_id: str, _: None = Depends(auth)):
+    with REGISTRY_LOCK:
+        entry = TASKS.get(task_id)
+        if entry is None:
+            return JSONResponse(status_code=404,
+                                content={"error": f"no task {task_id}"})
+        if entry["status"] != "running":
+            return JSONResponse(status_code=200,
+                                content={"task_id": task_id,
+                                         "status": entry["status"],
+                                         "cancelled": False})
+        entry["cancelling"] = True
+        proc = entry.get("proc")
+    if proc is not None:
+        _signal_pg(proc, signal.SIGTERM)
+    _finish_task(task_id, "cancelled",
+                 proc.returncode if proc is not None else None)
+    return JSONResponse(status_code=200,
+                        content={"task_id": task_id, "status": "cancelled",
+                                 "cancelled": True})
