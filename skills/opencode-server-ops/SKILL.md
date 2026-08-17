@@ -1,7 +1,7 @@
 ---
 name: opencode-server-ops
 description: "Operational diagnostics for the OpenCode v2 server — model registration pitfalls, SSE event taxonomy, timeout debugging, zombie session cleanup, server API endpoints. Use alongside opencode-driver when debugging OpenCode timeouts, model issues, or the oc wait mechanism."
-version: 2.3.0
+version: 2.4.0
 author: hermes-stack contributors
 license: MIT
 platforms: [linux]
@@ -401,6 +401,24 @@ context. Most useful beyond `oc`/`ocm`:
   `state.status` (a trivial read stuck in `running` for 10+ min = wedged
   session) and `state.input`. The keys are NOT `role`/`parts` — inspection
   scripts assuming those return empty.
+
+## Image-build failure: install.sh exit 127 (found 2026-08-17)
+
+`run.py --build` dying at the webui step with `RUN curl ... install.sh |
+bash` exit 127 is **not** a hermes-pod regression. Root cause: upstream
+installer installs Hermes-managed Node 26, which needs `libatomic.so.1`;
+minimal Debian bases lack it (upstream issue #87460, fix #87467 pending).
+The base image `ghcr.io/nesquena/hermes-webui:latest` is unpinned and can
+drift into this state between builds. Fix (landed in the pod Containerfile
+2026-08-17): `apt-get install libatomic1` runs before install.sh. If exit
+127 recurs at that step, first check the Containerfile still preinstalls
+libatomic1, then check upstream for new missing-lib issues of the same
+shape before suspecting the pod.
+
+**Base pinning:** webui base is pinned by digest
+(`sha256:b1b77b…9bb5`, pinned 2026-08-17). To refresh: pull `:latest`
+locally, verify, resolve the new index digest, update the Containerfile
+FROM line and comment date.
 
 ## Container/host path mapping
 
