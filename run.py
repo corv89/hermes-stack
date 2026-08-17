@@ -686,6 +686,7 @@ def build_images() -> None:
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/playwright/Containerfile'), '-t', 'localhost/hermes-playwright:latest', str(SCRIPT_DIR)])
     run(['podman', 'pull', 'docker.io/searxng/searxng:latest'])
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/webui/Containerfile'), '-t', 'localhost/hermes-webui:latest', str(SCRIPT_DIR)])
+    run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/pah-runner/Containerfile'), '-t', 'localhost/hermes-pah-runner:latest', str(SCRIPT_DIR)])
     run(['podman', 'build', '-f', str(SCRIPT_DIR / 'images/gbrain/Containerfile'),
          '-t', 'localhost/gbrain:latest', str(SCRIPT_DIR)])
     run(['podman', 'pull', LLAMA_IMAGE_CPU])

@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# pc — host wrapper: run the PAH driver in the hermes-pah-runner container,
+# per-task, with ONLY the target repo mounted.
+#
+# WHY a container: PAH's shell capability is allowlist-only with NO path
+# scoping — `cat` is in the default allowlist, so a driver running
+# in-process (as inside hermes-webui) lets the frontier agents read any
+# readable path, including ~/.hermes/.env (both frontier API keys). The
+# container removes the accidental whole: no $HOME, ~/.hermes, skills, or
+# secrets file is ever mounted; the only host paths reaching the container
+# are the target repo (at /workspace) and the named pah-runs volume for run
+# records. Keys are passed as -e vars sourced at call time from this
+# repo's .env — never logged, redacted in --dry-run output.
+#
+# pc [--dry-run] <pah-args...>   e.g.  pc run --workspace ~/Src/repo --task -
+#
+# --pull=never: the image exists only if built from this repo (run.py
+# --build). A missing image is a loud forcing function, never a silent
+# registry pull.
+#
+# --dry-run is the perimeter audit tool: prints the full podman command
+# with keys redacted to KEY=<set> and lists every mount source, asserting
+# that the ONLY source under /home is the workspace repo path itself (the
+# workspace is expected to live under ~/Src, which is under /home —
+# anything else under /home in the mount list is a violation).
+#
+# PC_DEV_MOUNT=1 (escape hatch): additionally bind-mounts the canonical
+# driver /workspace/pah-driver/pah.py at /opt/pah-dev/pah.py READ-ONLY and
+# runs that instead of the baked copy — dev iteration without rebuilds.
+# Read-only by design: agents inside the container must never be able to
+# edit the driver that is supposed to constrain them.
+#
+# Exit codes: pah's 0/1/2/3 contract propagates unchanged (pass / fail /
+# revision-limit / infra). Usage errors exit 2 before any container runs.
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$REPO_DIR/.env"
+IMAGE="localhost/hermes-pah-runner:latest"
+PAH_DRIVER_SRC="/workspace/pah-driver/pah.py"   # canonical, immutable
+
+die() { echo "pc: $*" >&2; exit 2; }
+
+usage() {
+  cat >&2 <<'EOF'
+usage: pc [--dry-run] <pah-args...>
+  e.g. pc run --workspace ~/Src/repo --task -
+       pc plan --workspace ~/Src/repo --task - --out /workspace/spec.md
+       pc doctor
+       pc show <run-id>
+EOF
+  exit 2
+}
+
+# --- parse pc's own flags ---------------------------------------------------
+dry_run=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) dry_run=1 ;;
+    -h|--help) usage ;;
+    --*) die "unknown flag: $1" ;;
+    *) break ;;
+  esac
+  shift
+done
+
+# --- validate pah subcommand + args -----------------------------------------
+[[ $# -gt 0 ]] || usage
+sub="$1"
+case "$sub" in
+  run|plan|doctor|show) ;;
+  *) die "arg 1 must be a pah subcommand (run|plan|doctor|show), got: $sub" ;;
+esac
+
+# Rewrite a host --workspace path to the in-container /workspace mount,
+# after resolving + sanity-checking it on the host. Everything else passes
+# through untouched.
+ws_abs=""
+pah_args=()
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  a="${args[$i]}"
+  case "$a" in
+    --workspace)
+      [[ $((i + 1)) -lt ${#args[@]} ]] || die "--workspace requires a path"
+      host_ws="${args[$((i + 1))]}"
+      i=$((i + 2))
+      ;;
+    --workspace=*)
+      host_ws="${a#--workspace=}"
+      i=$((i + 1))
+      ;;
+    *)
+      pah_args+=("$a")
+      i=$((i + 1))
+      continue
+      ;;
+  esac
+  [[ -n "${host_ws:-}" ]] || die "--workspace path is empty"
+  [[ -d "$host_ws" ]] || die "workspace not found on host: $host_ws"
+  ws_abs="$(cd "$host_ws" && pwd -P)"
+  # $HOME itself is the perimeter hole this wrapper exists to close.
+  [[ "$ws_abs" != "$HOME" ]] || die "refusing to mount \$HOME itself as the workspace"
+  pah_args+=(--workspace /workspace)
+done
+
+if [[ "$sub" == run || "$sub" == plan ]]; then
+  [[ -n "$ws_abs" ]] || die "$sub requires --workspace <path>"
+fi
+
+# --- keys: sourced at call time, never logged -------------------------------
+# grep the two names out of the repo .env; fail loudly if either is absent.
+[[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (expected at the hermes-pod repo root)"
+for name in GLM_API_KEY ALIBABA_TOKEN_PLAN_API_KEY; do
+  val="$(grep -E "^${name}=" "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
+  [[ -n "$val" ]] || die "$name missing from $ENV_FILE — add it (pc never proceeds without both keys)"
+  declare "$name=$val"
+done
+
+# --- assemble the podman command --------------------------------------------
+cmd=(podman run --rm -i
+  --pull=never
+  --network hermesnet
+  --userns keep-id --user 1000:1000
+  -e GLM_API_KEY="$GLM_API_KEY"
+  -e ALIBABA_TOKEN_PLAN_API_KEY="$ALIBABA_TOKEN_PLAN_API_KEY")
+[[ -n "$ws_abs" ]] && cmd+=(-v "$ws_abs:/workspace:rw,Z")
+cmd+=(-v pah-runs:/opt/pah-driver/runs)
+container_args=("${pah_args[@]}")
+if [[ "${PC_DEV_MOUNT:-}" == 1 ]]; then
+  [[ -f "$PAH_DRIVER_SRC" ]] || die "PC_DEV_MOUNT=1 but canonical driver not found: $PAH_DRIVER_SRC"
+  cmd+=(-v "$PAH_DRIVER_SRC:/opt/pah-dev/pah.py:ro"
+    --entrypoint /opt/venv/bin/python)
+  container_args=("/opt/pah-dev/pah.py" "${pah_args[@]}")
+fi
+cmd+=("$IMAGE" "${container_args[@]}")
+
+if [[ $dry_run -eq 1 ]]; then
+  # Redacted command line: env values never printed (KEY=<set>).
+  printable=()
+  prev=""
+  for a in "${cmd[@]}"; do
+    if [[ "$prev" == "-e" ]]; then
+      printable+=("${a%%=*}=<set>")
+    else
+      printable+=("$a")
+    fi
+    prev="$a"
+  done
+  printf '%q ' "${printable[@]}"; printf '\n'
+
+  echo "mount sources:"
+  audit_rc=0
+  in_v=0
+  for a in "${cmd[@]}"; do
+    if [[ $in_v -eq 1 ]]; then
+      src="${a%%:*}"
+      echo "  $src"
+      case "$src" in
+        "$ws_abs") ;;  # the workspace repo — the one allowed /home source
+        /home/*|"$HOME"|"$HOME"/*)
+          echo "pc: PERIMETER VIOLATION: mount source under \$HOME that is not the workspace repo: $src" >&2
+          audit_rc=1 ;;
+      esac
+      in_v=0
+    elif [[ "$a" == -v ]]; then
+      in_v=1
+    fi
+  done
+  if [[ $audit_rc -eq 0 ]]; then
+    echo "audit: no /home mount sources except the workspace repo"
+  fi
+  exit $audit_rc
+fi
+
+exec "${cmd[@]}"

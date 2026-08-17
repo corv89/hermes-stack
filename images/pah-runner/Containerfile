@@ -1,0 +1,35 @@
+# PAH driver runner: frontier agents that edit code, sandboxed.
+# Per-task `podman run --rm` via scripts/pc — NOT a long-lived service
+# (no quadlet by design; a unit would reintroduce a server).
+
+# Base pinned by digest. To refresh: pull python:3.12-slim locally, verify,
+# resolve the new digest, update here.
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+
+LABEL maintainer="hermes-stack contributors"
+LABEL description="PAH driver (plan/code/review pipeline) in a sealed per-task container"
+
+USER root
+
+# git only: the implementer-role allowlist includes it, slim ships none.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+COPY images/pah-runner/requirements.txt /tmp/requirements.txt
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Vendored from the canonical /workspace/pah-driver/pah.py — byte-identical
+# copy, canonical source remains /workspace/pah-driver/pah.py (immutable;
+# never edit the vendored file, re-copy from the source). Pinned against the
+# proven venv that produced requirements.txt (pydantic-ai-harness==0.21.0).
+# Provenance lives here, not in the vendored file itself.
+COPY images/pah-driver/pah.py /opt/pah-driver/pah.py
+
+# Non-root; home exists but stays empty — nothing is mounted there, so no
+# ~/.hermes is ever created inside the container (the whole point).
+RUN useradd -u 1000 -m -d /opt/pah-driver pah
+
+ENV PATH=/opt/venv/bin:$PATH VIRTUAL_ENV=/opt/venv
+
+USER pah
+
+ENTRYPOINT ["/opt/venv/bin/python", "/opt/pah-driver/pah.py"]
