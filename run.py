@@ -28,18 +28,19 @@ Usage:
 
 Startup order (systemd-ordered + readiness gates):
   opencode (fatal) -> sidecar (model loads in background)
-  -> llama-embed + llama-rerank (Vulkan on Vega 56) -> gbrain-pg -> gbrain
+  -> llama-embed + llama-rerank (ROCm on RX 9070 XT) -> gbrain-pg -> gbrain
   -> config-sync (mints the gbrain MCP token, merges config.yaml)
   -> hermes-webui -> searxng/trafilatura/playwright -> sourcebot
 
 Failure policy: only opencode + webui are fatal (the core stack). Everything
 else is warn-and-continue so an add-on hiccup never blocks it.
 
-GPU layout (dual-GPU host):
-  Vega 56 (gfx900, 8GB)   - embed + rerank via the llama.cpp Vulkan backend
-  R9700   (gfx1201, 32GB) - sidecar 35B-A3B MoE via ROCm (pinned via
-                            ROCR_VISIBLE_DEVICES: a ROCm runtime supports only
-                            one GPU generation, so it must not see the Vega)
+GPU layout (dual-GPU host, both gfx1201/RDNA4 — pinned by PCI device id, not
+by gfx generation, since both cards share gfx1201 and KFD agent order is not
+stable across hardware changes):
+  RX 9070 XT (gfx1201, 16GB) @ 06:00.0 - embed + rerank (llama.cpp ROCm)
+  R9700      (gfx1201, 32GB) @ 0e:00.0 - sidecar 35B-A3B MoE (ROCm)
+  whisper.cpp runs its Vulkan build on the 9070 XT render node.
 """
 from __future__ import annotations
 
@@ -98,19 +99,24 @@ WHISPER_MODEL_URL = (
 )
 
 LLAMA_IMAGE_CPU = "ghcr.io/ggml-org/llama.cpp:server"          # CPU fallback
-# Vulkan backend for the aux servers on the Vega 56 (gfx900): ROCm dropped
-# gfx900 support, but Vulkan (RADV) still handles it. The official image ships
-# mesa-vulkan-drivers, so the container only needs the Vega's render node.
+# Legacy Vulkan llama.cpp image — kept as a fallback, but no quadlet currently
+# uses it (embed/rerank run on the ROCm sidecar image; whisper has its own
+# Vulkan image built from images/whisper).
 LLAMA_IMAGE_VULKAN = "ghcr.io/ggml-org/llama.cpp:server-vulkan"
 # gfx1201/RDNA4-capable build: the official :server-rocm image's ROCm is too
-# old to see the R9700, so the sidecar uses a custom image — recipe in
+# old to see RDNA4, so the sidecar uses a custom image — recipe in
 # images/sidecar/Containerfile (rebuild: `run.py --build-sidecar`).
 LLAMA_IMAGE_ROCM = "localhost/llamacpp-sidecar:latest"
 
-# --- GPU topology (dual-GPU host) ---------------------------------------------
-GPU_PCI_VULKAN = "0000:06:00.0"   # Vega 56 (gfx900)
-GPU_PCI_ROCM = "0000:0e:00.0"     # R9700 (gfx1201)
-GPU_GFX_ROCM = 120001             # KFD gfx_target_version of the R9700
+# --- GPU topology (dual-GPU host, both gfx1201/RDNA4) -------------------------
+# Workloads are pinned by PCI device_id because KFD agent order is not stable
+# across hardware changes: the Vega->9070 XT swap left two identical gfx1201
+# cards, which broke the old "first gfx1201 == R9700" assumption and silently
+# mis-pinned the 35B MoE onto the 16GB card.
+GPU_PCI_AUX = "0000:06:00.0"      # RX 9070 XT (gfx1201, 16GB) - embed/rerank/whisper
+GPU_PCI_ROCM = "0000:0e:00.0"     # R9700      (gfx1201, 32GB) - MoE sidecar
+GPU_DEV_ID_AUX = 0x7550           # KFD device_id of the RX 9070 XT
+GPU_DEV_ID_SIDECAR = 0x7551       # KFD device_id of the R9700
 
 
 def render_node(pci_addr: str) -> str:
@@ -130,9 +136,14 @@ def _safe_render_node(pci_addr: str) -> str:
         return ""
 
 
-def rocm_agent_index(gfx_target: int) -> str:
-    """GPU agent index (for ROCR_VISIBLE_DEVICES) of a gfx target in the KFD
-    topology. The CPU node (gfx_target_version 0) is skipped."""
+def rocm_agent_index(device_id: int) -> str:
+    """GPU agent index (for ROCR_VISIBLE_DEVICES) of the KFD topology node
+    matching a PCI device_id (e.g. 0x7551 for the R9700). CPU nodes
+    (gfx_target_version 0) are skipped.
+
+    Pinned by device_id rather than gfx_target_version because this host runs
+    two GPUs of the same generation (gfx1201); KFD agent order is not stable
+    across hardware changes, so matching on generation alone is ambiguous."""
     nodes = Path("/sys/class/kfd/kfd/topology/nodes")
     idx = 0
     for node in sorted(nodes.iterdir(), key=lambda n: int(n.name)):
@@ -140,16 +151,18 @@ def rocm_agent_index(gfx_target: int) -> str:
         if not props.exists():
             continue
         gfx = 0
+        dev_id = 0
         for line in props.read_text().splitlines():
             if line.startswith("gfx_target_version"):
                 gfx = int(line.split()[1])
-                break
+            elif line.startswith("device_id"):
+                dev_id = int(line.split()[1])
         if gfx == 0:
             continue
-        if gfx == gfx_target:
+        if dev_id == device_id:
             return str(idx)
         idx += 1
-    raise RuntimeError(f"no KFD GPU agent with gfx_target_version {gfx_target}")
+    raise RuntimeError(f"no KFD GPU agent with device_id 0x{device_id:x}")
 
 
 # Env keys whose values must never appear in logs.
@@ -189,18 +202,19 @@ providers:
     base_url: http://hermes-sidecar:8090/v1
 model:
   provider: custom:sidecar
-  default: qwen3.6-35b-a3b
+  default: qwen3.8-27b
   # Explicit (matches providers.sidecar): deep-merge never deletes keys, so
   # this clobbers the stale cloud base_url left over from the zai-primary era.
   base_url: http://hermes-sidecar:8090/v1
-  # Must match the sidecar's unified KV pool (CTX_SIZE) and clear Hermes'
-  # 64K minimum-context gate (agent_init MINIMUM_CONTEXT_LENGTH).
-  context_length: 65536
+  # Matches the full per-slot context of the sidecar pool (CTX_SIZE 262144 /
+  # NP 2 = 128K per slot); Hermes may consume a full slot when Sourcebot is
+  # idle.
+  context_length: 131072
 agent:
   api_max_retries: 1
 fallback_providers:
   - provider: zai
-    model: glm-5-turbo
+    model: glm-5.3
     base_url: https://api.z.ai/api/coding/paas/v4
 skills:
   external_dirs:
@@ -451,8 +465,9 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "REPO": str(SCRIPT_DIR),
         "PROJECT_MOUNT": PROJECT_MOUNT,
         "GBRAIN_DATA_DIR": str(GBRAIN_DATA_DIR),
-        "VEGA_RENDER": _safe_render_node(GPU_PCI_VULKAN),
-        "ROCR_INDEX": rocm_agent_index(GPU_GFX_ROCM),
+        "AUX_RENDER": _safe_render_node(GPU_PCI_AUX),
+        "ROCR_INDEX_AUX": rocm_agent_index(GPU_DEV_ID_AUX),
+        "ROCR_INDEX_SIDECAR": rocm_agent_index(GPU_DEV_ID_SIDECAR),
         "EMBED_MODEL_FILE": EMBED_MODEL_FILE,
         "RERANK_MODEL_FILE": RERANK_MODEL_FILE,
         "WHISPER_MODEL_FILE": WHISPER_MODEL_FILE,
@@ -578,6 +593,63 @@ def check_secrets() -> None:
         log(f"WARN: secret(s) with leading/trailing whitespace "
             f"(likely `echo` vs `printf '%s'`): {', '.join(bad)}")
         log("      Recreate cleanly: printf '%s' \"$VALUE\" | podman secret create <name> -")
+
+
+# --- GPU ReBAR / Above-4G pre-flight ------------------------------------------
+def check_gpu_rebar() -> None:
+    """Warn if Resizable BAR / Above 4G Decoding aren't engaged on any AMD GPU.
+
+    Without ReBAR the PCI BAR aperture stays at 256 MiB, so the host can only
+    page VRAM to the card through a 256 MiB window — a real penalty for
+    large-model inference (slow loads + host<->device transfer). A GPU counts
+    as optimal when its largest BAR is >= 1 GiB (ReBAR exposes the full VRAM as
+    one BAR; the legacy aperture is 256 MiB). Warn-and-continue."""
+    REBAR_OK_BYTES = 1 << 30  # 1 GiB threshold
+    found = False
+    for card_link in sorted(Path("/sys/class/drm").glob("card[0-9]*"), key=lambda p: p.name):
+        if not re.match(r"card\d+$", card_link.name):
+            continue
+        device_path = card_link / "device"
+        try:
+            if (not device_path.exists()
+                    or (device_path / "vendor").read_text().strip() != "0x1002"):
+                continue
+            found = True
+            pci = device_path.resolve().name  # GPU PCI BDF, e.g. 0000:0e:00.0
+            if not re.match(r"0000:[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+", pci):
+                pci = "unknown"
+            card = card_link.name
+            try:
+                vram = int((device_path / "mem_info_vram_total").read_text())
+            except (IOError, ValueError):
+                vram = 0
+            max_bar = 0
+            res = Path(f"/sys/bus/pci/devices/{pci}/resource")
+            if res.exists():
+                for line in res.read_text().splitlines()[:7]:
+                    parts = line.split()
+                    if len(parts) < 2:
+                        break
+                    start, end = int(parts[0], 16), int(parts[1], 16)
+                    if start and end > start:
+                        max_bar = max(max_bar, end - start + 1)
+            bar_mib = max_bar // (1 << 20)
+            vram_mib = vram // (1 << 20)
+            if max_bar < REBAR_OK_BYTES:
+                log(f"WARN: GPU {pci} ({card}) Resizable BAR not engaged "
+                    f"(largest BAR {bar_mib} MiB << VRAM {vram_mib} MiB) — "
+                    f"model load/unload is slower through the 256 MiB "
+                    f"aperture; steady inference is unaffected while the "
+                    f"model fits in VRAM. Enable Above 4G Decoding + "
+                    f"Re-Size BAR in BIOS.")
+            else:
+                log(f"  ok: GPU {pci} ({card}) ReBAR engaged "
+                    f"(largest BAR {bar_mib} MiB)")
+        except Exception as exc:  # never let a telemetry check block the stack
+            log(f"WARN: ReBAR pre-flight could not inspect {device_path} "
+                f"({exc}); skipping")
+    if not found:
+        log("WARN: ReBAR pre-flight found no AMD GPU; skipping")
 
 
 # --- gbrain MCP token + config sync -------------------------------------------
@@ -880,6 +952,7 @@ def start_stack(cfg: dict[str, str]) -> None:
     log("Installing/refreshing quadlet units ...")
     install_units(cfg)
     check_secrets()
+    check_gpu_rebar()
     prepare_dirs()
     log("Checking gbrain model files ...")
     download_models()
@@ -953,8 +1026,8 @@ def banner(cfg: dict[str, str]) -> None:
     log("Trafilatura: http://127.0.0.1:8100")
     log("Playwright:  http://127.0.0.1:8101")
     log("gbrain MCP:  http://127.0.0.1:8083/mcp")
-    log("Embeddings:  http://127.0.0.1:8084/v1  (Vulkan/Vega 56)")
-    log("Reranker:    http://127.0.0.1:8085/v1  (Vulkan/Vega 56)")
+    log("Embeddings:  http://127.0.0.1:8084/v1  (ROCm/RX 9070 XT)")
+    log("Reranker:    http://127.0.0.1:8085/v1  (ROCm/RX 9070 XT)")
     log("Sidecar:     http://127.0.0.1:8090     (ROCm/R9700)")
     log("Node exp:  http://127.0.0.1:9100/metrics  (host telemetry)")
     log("GPU exp:   http://127.0.0.1:9101/metrics  (AMD GPU stats)")
