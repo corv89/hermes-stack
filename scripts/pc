@@ -115,6 +115,10 @@ fi
 [[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (expected at the hermes-pod repo root)"
 for name in GLM_API_KEY ALIBABA_TOKEN_PLAN_API_KEY; do
   val="$(grep -E "^${name}=" "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
+  # strip matching surrounding quotes ('...' or "...") — only when first and
+  # last char form a pair; unmatched quotes are preserved as part of the value.
+  if [[ "$val" == \'*\' ]]; then val="${val#\'}"; val="${val%\'}"; fi
+  if [[ "$val" == \"*\" ]]; then val="${val#\"}"; val="${val%\"}"; fi
   [[ -n "$val" ]] || die "$name missing from $ENV_FILE — add it (pc never proceeds without both keys)"
   declare "$name=$val"
 done

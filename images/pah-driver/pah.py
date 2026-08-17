@@ -64,7 +64,11 @@ def load_env() -> dict[str, str]:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")
-                out[k.strip()] = v.strip()
+                v = v.strip()
+                # strip matching surrounding quotes ('...' or "...")
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                out[k.strip()] = v
     return out
 
 
@@ -319,8 +323,8 @@ def doctor() -> int:
     ok = True
     print(f"harness pin: {HARNESS_VERSION}")
     for name, present in [
-        ("GLM_API_KEY (zai)", bool(ENV.get("GLM_API_KEY"))),
-        ("ALIBABA_TOKEN_PLAN_API_KEY (bailian sk-sp-)", ENV.get("ALIBABA_TOKEN_PLAN_API_KEY", "").startswith("sk-sp-")),
+        ("GLM_API_KEY (zai)", bool(os.environ.get("GLM_API_KEY") or ENV.get("GLM_API_KEY"))),
+        ("ALIBABA_TOKEN_PLAN_API_KEY (bailian sk-sp-)", (os.environ.get("ALIBABA_TOKEN_PLAN_API_KEY") or ENV.get("ALIBABA_TOKEN_PLAN_API_KEY", "")).startswith("sk-sp-")),
     ]:
         print(f"  {name}: {'ok' if present else 'MISSING'}")
         ok = ok and present
