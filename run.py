@@ -207,6 +207,7 @@ model:
   # this clobbers the stale cloud base_url left over from the zai-primary era.
   base_url: http://hermes-sidecar:8090/v1
 agent:
+  reasoning_effort: medium
   api_max_retries: 1
 fallback_providers:
   - provider: zai
