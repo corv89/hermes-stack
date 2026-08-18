@@ -284,7 +284,7 @@ async def _spawn_driver_proc(argv: list[str]):
     """Vendored driver as a subprocess: list argv, no shell, cwd=/, task on
     stdin, OWN process group (start_new_session) so /cancel and timeouts
     reach the driver's whole tree, not just the python parent."""
-    return asyncio.create_subprocess_exec(
+    return await asyncio.create_subprocess_exec(
         str(VENV_PY), str(DRIVER), *argv,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -350,7 +350,7 @@ async def spawn_driver(argv: list[str], task: str, timeout_s: int):
     duration_s, timed_out); exit_code is None when spawn itself failed."""
     try:
         proc = await _spawn_driver_proc(argv)
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - structured failure, never a raw 500
         return None, "", f"spawn failed: {e}", 0.0, False
     return await _stream_proc(proc, task, timeout_s)
 
@@ -375,7 +375,7 @@ async def execute_tracked(kind: str, repo: str, repo_path: str,
 
     try:
         proc = await _spawn_driver_proc(argv)
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - release the lock, never orphan it
         _finish_task(task_id, "failed", None)
         return task_id, None, "", f"spawn failed: {e}", 0.0, False
     with REGISTRY_LOCK:
