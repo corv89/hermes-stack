@@ -14,7 +14,11 @@ LABEL description="PAH service: FastAPI front end for the vendored PAH driver (i
 USER root
 
 # git only: the implementer-role allowlist includes it, slim ships none.
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git make && rm -rf /var/lib/apt/lists/*
+
+# uv from the official distroless image — same pattern as images/opencode.
+# Coder-role verification commands (uv run pytest/ruff/ty, make lint) need it.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 COPY images/pah-service/app/requirements.txt /tmp/requirements.txt
 RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt

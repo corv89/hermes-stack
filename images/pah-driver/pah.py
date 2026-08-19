@@ -237,7 +237,24 @@ async def run_step(
 
 async def run_pipeline(workspace: Path, task: str, max_revisions: int) -> int:
     run_id = f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    allowed = ["python3", "pytest", "ls", "cat", "git", "grep", "rg", "diff"]
+    # OC-parity toolchain: uv/make/ruff are how real repos verify (uv run
+    # pytest, make lint). The harness default already trusts these; the old
+    # narrower list aborted runs on spec verification commands (2026-08-19,
+    # sourcebot run 20260819_063441_1c5766). No shell (bash/sh) — the
+    # allowlist gates what the model can spawn directly.
+    allowed = [
+        "python3", "python", "pytest", "uv", "make", "ruff",
+        "ls", "cat", "git", "grep", "rg", "find", "sed", "head", "tail",
+        "diff",
+    ]
+    # uv must never sync the repo's own .venv: host checkouts symlink their
+    # interpreter to host uv paths, invisible in-container; an in-place
+    # re-create would poison the host venv. Redirect to a per-repo
+    # container-side environment (overridable for volume-mounted setups).
+    venv_root = Path(os.environ.get("PAH_VENV_ROOT", "/tmp/pah-venvs"))
+    repo_env = venv_root / workspace.name
+    repo_env.mkdir(parents=True, exist_ok=True)
+    os.environ["UV_PROJECT_ENVIRONMENT"] = str(repo_env)
     roles = {"plan": "glm-5.3@zai", "code": "glm-5.3@zai", "review": "qwen3.8-max@bailian"}
     log: dict = {
         "run_id": run_id,
