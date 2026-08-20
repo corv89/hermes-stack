@@ -484,6 +484,11 @@ def show_logs(name: str, tail: int = 20) -> None:
 
 
 # --- rendering + installing ---------------------------------------------------
+def sourcebot_root(cfg: dict[str, str]) -> Path:
+    """Checkout of the optional sourcebot add-on (private, non-published)."""
+    return Path(cfg.get("SOURCEBOT_HOME", str(PROJECT_MOUNT / "sourcebot")))
+
+
 def render_units(cfg: dict[str, str]) -> dict[str, str]:
     subs = {
         "HOME": str(Path.home()),
@@ -511,9 +516,14 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         # one pass, so the pair always matches.
         "PAH_TOKEN": cfg.get("PAH_TOKEN") or secrets.token_hex(20),
     }
+    if not sourcebot_root(cfg).is_dir():
+        log(f"  sourcebot: {sourcebot_root(cfg)} not found — skipping the "
+            "optional hermes-sourcebot unit")
     units: dict[str, str] = {}
     for f in sorted(QUADLET_SRC.iterdir()):
         if f.suffix not in (".container", ".network", ".service"):
+            continue
+        if f.name == "hermes-sourcebot.container" and not sourcebot_root(cfg).is_dir():
             continue
         text = f.read_text()
         for key, val in subs.items():
@@ -588,15 +598,19 @@ def wait_gate(name: str, url: str, timeout: int, require_ok: bool,
 
 
 # --- secrets ------------------------------------------------------------------
-def check_secrets() -> None:
+def check_secrets(cfg: dict[str, str]) -> None:
     """Verify podman secrets exist and have no leading/trailing whitespace.
 
     Secrets are created out-of-band (never stored in .env); a trailing newline
     from `echo` vs `printf '%s'` makes external APIs reject the key.
+    Sourcebot secrets are only checked when the sourcebot checkout exists
+    (it is an optional, non-published add-on).
     """
     args = ["podman", "run", "--rm"]
     mounted: list[tuple[str, str]] = []
     for secret, target in SECRETS:
+        if secret.startswith("sourcebot-") and not sourcebot_root(cfg).is_dir():
+            continue
         if run(["podman", "secret", "exists", secret], check=False, quiet=True).returncode == 0:
             args += ["--secret", f"{secret},type=env,target={target}"]
             mounted.append((secret, target))
@@ -976,7 +990,8 @@ def prepare_dirs() -> None:
 def start_stack(cfg: dict[str, str]) -> None:
     log("Installing/refreshing quadlet units ...")
     install_units(cfg)
-    check_secrets()
+    sourcebot_present = sourcebot_root(cfg).is_dir()
+    check_secrets(cfg)
     check_gpu_rebar()
     prepare_dirs()
     log("Checking gbrain model files ...")
@@ -986,13 +1001,17 @@ def start_stack(cfg: dict[str, str]) -> None:
     # ordering (gbrain after pg). Config sync runs before the webui so the
     # agent boots with a fresh gbrain MCP token + merged config.yaml.
     log("Starting containers ...")
-    systemctl_user("start", *[f"{u}.service" for u in CONTAINER_UNITS
+    units = [u for u in CONTAINER_UNITS
+             if u != "hermes-sourcebot" or sourcebot_present]
+    systemctl_user("start", *[f"{u}.service" for u in units
                                 if u != "hermes-webui"])
     config_sync(restart_webui=False)
     systemctl_user("start", "hermes-webui.service")
 
     log("Readiness gates ...")
     for name, url, timeout, require_ok, fatal in GATES:
+        if name == "hermes-sourcebot" and not sourcebot_present:
+            continue
         wait_gate(name, url, timeout, require_ok, fatal)
 
     log("Forgejo bootstrap ...")
@@ -1015,7 +1034,7 @@ def redeploy(cfg: dict[str, str]) -> None:
     for name in ("hermes-opencode", "hermes-sidecar", "hermes-llama-embed",
                  "hermes-llama-rerank", "hermes-gbrain-pg", "hermes-gbrain",
                  "hermes-searxng", "hermes-trafilatura", "hermes-playwright",
-                 "sourcebot", "hermes-webui",
+                 "sourcebot", "hermes-webui",  # rm -f is a no-op when absent
                  "hermes-forgejo", FORGEJO_RUNNER_UNIT):
         run(["podman", "rm", "-f", name], check=False, quiet=True)
     start_stack(cfg)
@@ -1036,14 +1055,17 @@ def status() -> None:
 
 def banner(cfg: dict[str, str]) -> None:
     log()
+    sourcebot_up = unit_active("hermes-sourcebot.service")
     log("=== Stack started (Quadlet units on hermesnet) ===")
     log("WebUI:       http://127.0.0.1:8787")
-    log("Sourcebot:   http://127.0.0.1:8181")
+    if sourcebot_up:
+        log("Sourcebot:   http://127.0.0.1:8181")
     log("Forgejo:     http://127.0.0.1:3000  (git forge + Actions)")
     root_url = cfg.get("FORGEJO_ROOT_URL", "").rstrip("/")
     if root_url:
         log(f"Tailscale:   {root_url}        (Hermes :443)")
-        log(f"             {root_url}:8443   (Sourcebot)")
+        if sourcebot_up:
+            log(f"             {root_url}:8443   (Sourcebot)")
     else:
         log("Tailscale:   <tailnet URL not configured>")
     log("OpenCode:    http://127.0.0.1:45650")

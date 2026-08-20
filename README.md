@@ -119,8 +119,10 @@ the sidecar unit for faster, reasoning-free replies.
 | Add-on | `hermes-podman-exporter` | `navidys/prometheus-podman-exporter` | 9102 | podman container stats (read-only) |
 
 \* The `sourcebot` image is **proprietary and optional**: it is built in a
-separate, private repo and will not be published. The `sidecar` image itself
-builds from `images/sidecar/Containerfile` via
+separate, private repo and will not be published. run.py detects a missing
+checkout (path overridable via `SOURCEBOT_HOME` in `.env`) and skips the
+unit, its secrets pre-flight, and its readiness gate. The `sidecar` image
+itself builds from `images/sidecar/Containerfile` via
 `python3 run.py --build-sidecar` (pinned llama.cpp commit; heavy, run only
 when bumping llama.cpp or ROCm), and `python3 run.py --build` builds
 everything else; plain `python3 run.py` does **not** rebuild images.
