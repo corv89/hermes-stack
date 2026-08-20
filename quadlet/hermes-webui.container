@@ -41,6 +41,7 @@ Volume=hermes-webui-local:/home/hermeswebui/.local
 Volume=hermes-webui-cache:/home/hermeswebui/.cache
 Volume={{PROJECT_MOUNT}}:/work:ro,z
 Volume={{REPO}}/hermes-workspace:/workspace:rw,z
+Volume=pah-runs:/pah-runs:ro,z
 PublishPort=127.0.0.1:8787:8787
 
 [Service]

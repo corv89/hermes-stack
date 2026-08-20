@@ -20,6 +20,10 @@ Routes — ALL require the X-PAH-Token header (hmac-compared to PAH_TOKEN):
   POST /show             {run_id} → the stored run record, verbatim
   GET  /tasks            → live task-registry summaries
   GET  /status/{task_id} → one task entry incl. its stdout tail (sk- redacted)
+  GET  /events/{task_id}  → SSE stream of new tail lines (data frames),
+                            event: gap {"oldest"} on ring rotation past the
+                            cursor, : keepalive every ~15s, terminal
+                            event: done {"exit_code", "run_id"}
   POST /cancel/{task_id} → SIGTERM the task's process group; mark cancelled
 
 Exit→HTTP: 200 pass, 224 fail-verdict, 225 revision-limit, 400 validation,
@@ -56,7 +60,7 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 WORK_ROOT = Path("/work")
@@ -147,8 +151,9 @@ def resolve_repo(repo: str) -> Path:
 
 
 def resolve_task(task: str) -> str:
-    """Inline task text, or a /work-relative file path read HERE — no task
-    file path is ever passed through to the driver."""
+    """Inline task text, or a file path read HERE (no task file path is ever
+    passed through to the driver): /work-relative, or absolute under /work
+    or /workspace (read-only twin of the webui's hermes-workspace mount)."""
     if not task.strip():
         raise Bad("task is empty (inline text or a /work-relative file path)")
     if "\n" not in task:  # a file path never contains a newline
@@ -158,8 +163,9 @@ def resolve_task(task: str) -> str:
             real = cand.resolve()
         except (OSError, ValueError):
             return task
-        if real.is_file() and root in real.parents:
-            return real.read_text()
+        for base in (root, Path("/workspace").resolve()):
+            if real.is_file() and base in real.parents:
+                return real.read_text()
     return task
 
 
@@ -206,11 +212,16 @@ class RepoBusy(Exception):
         self.holder = holder_task_id
 
 
+def _visible(ln: str) -> bool:
+    """Redaction guard as a predicate (SSE filters with it instead of dropping)."""
+    return not any(p in ln for p in KEY_PREFIXES)
+
+
 def redacted(lines) -> list[str]:
     """Defense in depth: drop any line carrying a key prefix before it is
     returned to a caller. pah.py never prints keys; this guard exists so
     the registry cannot become a leak channel if that ever changes."""
-    return [ln for ln in lines if not any(p in ln for p in KEY_PREFIXES)]
+    return [ln for ln in lines if _visible(ln)]
 
 
 def _register_task(kind: str, repo: str, repo_path: str) -> tuple[str, str | None]:
@@ -232,6 +243,7 @@ def _register_task(kind: str, repo: str, repo_path: str) -> tuple[str, str | Non
             "status": "running",
             "exit_code": None,
             "run_id": None,
+            "seq": 0,  # monotonic per-task line counter (SSE cursors)
             "last_lines": deque(maxlen=MAX_TAIL_LINES),
         }
         return task_id, None
@@ -261,11 +273,13 @@ def _task_summary(e: dict) -> dict:
 
 
 def _task_payload(e: dict) -> dict:
-    """Full /status entry — internal keys (proc, cancelling, repo_path)
-    stay out, and the tail goes through the redaction guard."""
+    """Full /status entry — internal keys (proc, cancelling, repo_path) stay
+    out, the tail goes through the redaction guard, and `cursor` is the
+    current max line seq (SSE bootstrap)."""
     d = _task_summary(e)
     d["started_at"] = round(e["started_at"], 3)
-    d["last_lines"] = redacted(list(e["last_lines"]))
+    d["last_lines"] = redacted([ln for _s, ln in e["last_lines"]])
+    d["cursor"] = e["seq"]
     return d
 
 
@@ -368,7 +382,9 @@ async def execute_tracked(kind: str, repo: str, repo_path: str,
     entry = TASKS[task_id]
 
     def on_line(text: str) -> None:
-        entry["last_lines"].append(text)
+        with REGISTRY_LOCK:
+            entry["seq"] += 1
+            entry["last_lines"].append((entry["seq"], text))
         m = RUN_ID_RE.search(text)
         if m and entry["run_id"] is None:
             entry["run_id"] = m.group(1)
@@ -585,6 +601,60 @@ async def task_status(task_id: str, _: None = Depends(auth)):
         return JSONResponse(status_code=404,
                             content={"error": f"no task {task_id}"})
     return JSONResponse(status_code=200, content=payload)
+
+
+@app.get("/events/{task_id}")
+async def task_events(task_id: str, cursor: int = 0, _: None = Depends(auth)):
+    """SSE tail of a task: one `data:` frame per new stdout line (seq >
+    cursor), `event: gap` {"oldest": N} once when the 50-line ring rotated
+    past the cursor, `: keepalive` every ~15s, and a terminal
+    `event: done` {"exit_code", "run_id"} when the task leaves `running`.
+    Polls the in-memory registry once per second — the only await is
+    asyncio.sleep(1). Lines pass the same redaction guard as /status
+    (dropped lines still advance the cursor)."""
+    with REGISTRY_LOCK:
+        if TASKS.get(task_id) is None:
+            return JSONResponse(status_code=404,
+                                content={"error": f"no task {task_id}"})
+
+    async def stream():
+        cur = max(cursor, 0)
+        gap_sent = False
+        last_out = time.monotonic()
+        while True:
+            with REGISTRY_LOCK:
+                e = TASKS.get(task_id)
+                snapshot = None if e is None else {
+                    "status": e["status"], "lines": list(e["last_lines"]),
+                    "run_id": e["run_id"], "exit_code": e["exit_code"]}
+            if snapshot is None:  # pruned mid-stream (>100 finished tasks)
+                yield 'event: done\ndata: {"exit_code": null, "run_id": null}\n\n'
+                return
+            lines = snapshot["lines"]
+            if lines and lines[0][0] > cur + 1 and not gap_sent:
+                gap_sent = True
+                yield f'event: gap\ndata: {{"oldest": {lines[0][0]}}}\n\n'
+                last_out = time.monotonic()
+            fresh = [(s, ln) for s, ln in lines if s > cur and _visible(ln)]
+            for s, ln in fresh:
+                # defensive: multi-line payloads JSON-encoded to one SSE line
+                payload = json.dumps(ln) if "\n" in ln else ln
+                yield f"data: {payload}\n\n"
+            if fresh:
+                last_out = time.monotonic()
+            if lines:
+                cur = max(cur, lines[-1][0])
+            if snapshot["status"] != "running":
+                yield ("event: done\ndata: "
+                       + json.dumps({"exit_code": snapshot["exit_code"],
+                                     "run_id": snapshot["run_id"]}) + "\n\n")
+                return
+            await asyncio.sleep(1)
+            if time.monotonic() - last_out >= 15:
+                yield ": keepalive\n\n"
+                last_out = time.monotonic()
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.post("/cancel/{task_id}")

@@ -30,6 +30,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -103,6 +104,10 @@ def model_bailian(model_id: str = "qwen3.8-max") -> OpenAIChatModel:
 class Finding(BaseModel):
     severity: Literal["blocker", "major", "minor"] = "minor"
     file: str = ""
+    quote: str = Field(
+        default="",
+        description="verbatim line(s) copied from the named file that ground this finding",
+    )
     description: str
 
 
@@ -122,6 +127,7 @@ def planner(workspace: Path) -> Agent:
     return Agent(
         model_zai(),
         capabilities=[fs],
+        retries={'tools': 3},
         instructions=(
             "You are the planning role. Inspect the workspace read-only and "
             "produce an implementation spec: files to touch, exact changes, "
@@ -140,6 +146,7 @@ def implementer(workspace: Path, allowed_commands: list[str]) -> Agent:
     return Agent(
         model_zai(),
         capabilities=[coder],
+        retries={'tools': 3},
         instructions=(
             "You are the implementation role. Follow the spec exactly. "
             "Commit nothing unless the spec says so. Run the spec's "
@@ -154,6 +161,7 @@ def reviewer(workspace: Path) -> Agent:
     return Agent(
         model_bailian(),
         capabilities=[fs],
+        retries={'tools': 3},
         # NativeOutput = JSON-schema response_format, no tool_choice in the
         # request. This keeps qwen3.8-max's thinking mode ON (required for
         # adversarial review quality) while preserving the structured verdict:
@@ -163,9 +171,12 @@ def reviewer(workspace: Path) -> Agent:
         instructions=(
             "You are the adversarial review role. Argue the change at full "
             "strength: correctness, edge cases, spec compliance, security. "
-            "Only verify what you can see in the workspace; do not assume. "
-            "Return the structured verdict. 'fail' only for blockers or "
-            "majors; minors alone do not fail a change."
+            "You are grounded by the WORKSPACE FILE CONTENTS block in the "
+            "prompt — verify every claim against it verbatim. Every finding "
+            "MUST carry a `quote`: the exact line(s) copied from that block "
+            "that ground it. A finding you cannot quote is a finding you "
+            "have not verified — do not report it. 'fail' only for blockers "
+            "or majors; minors alone do not fail a change."
         ),
     )
 
@@ -187,7 +198,8 @@ async def plan_only(workspace: Path, task: str, out_path: Path) -> int:
         "steps": [],
         "outcome": None,
     }
-    spec = await run_step(log, {"plan": "glm-5.3@zai"}, "plan", planner(workspace), f"Task:\n{task}")
+    spec = await run_step(log, {"plan": "glm-5.3@zai"}, "plan", planner(workspace),
+                          f"Task:\n{task}", run_id=run_id, seq=1)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(str(spec))
     log["outcome"] = "pass"
@@ -203,8 +215,134 @@ def record(entry: dict) -> None:
         f.write(json.dumps(entry, default=str) + "\n")
 
 
+# --- per-step transcripts (observability v2) ------------------------------
+
+
+def _step_slug(name: str) -> str:
+    """Sanitize a step name for a filename: [a-z0-9-], runs collapsed."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "step"
+
+
+def dump_transcript(run_id: str, seq: int, name: str, result) -> None:
+    """Best-effort per-step transcript: one JSON object per line at
+    <RUNS_DIR>/<run_id>/step-<NN>-<slug>.jsonl, built from
+    result.new_messages() (pydantic-ai 2.31 ModelRequest/ModelResponse,
+    .parts carry part_kind; TextPart.content, ToolCallPart.tool_name/.args
+    [str|dict|None], ToolReturnPart.tool_name/.content/.outcome,
+    RetryPromptPart.tool_name/.content [str | ErrorDetails list]).
+
+    Diagnostics, not contract: any failure appends an {"error": ...} line
+    and the run continues. Never touches records.jsonl or step aggregates.
+    (Failure-path note: UnexpectedModelBehavior in 2.31 exposes no message
+    history, so steps whose agent.run() raised get no transcript — by
+    design; don't chase e.message_history.)"""
+    try:
+        if not run_id or seq < 1:
+            return
+        run_dir = RUNS_DIR / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / f"step-{seq:02d}-{_step_slug(name)}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for i, msg in enumerate(result.new_messages()):
+                for part in getattr(msg, "parts", ()):
+                    kind = getattr(part, "part_kind", type(part).__name__)
+                    tool = getattr(part, "tool_name", None)
+                    if kind == "tool-call":
+                        args = getattr(part, "args", None)
+                        detail = (json.dumps(args, default=str)
+                                  if isinstance(args, dict) else str(args))
+                    elif kind == "tool-return":
+                        detail = str(getattr(part, "content", ""))
+                        outcome = getattr(part, "outcome", None)
+                        if outcome is not None:
+                            detail = f"{detail} outcome={outcome}"
+                    else:
+                        # text / user-prompt / system-prompt / thinking /
+                        # retry-prompt (str or ErrorDetails list → str())
+                        detail = str(getattr(part, "content", ""))
+                    f.write(json.dumps(
+                        {"msg_i": i, "part_kind": kind, "tool_name": tool,
+                         "detail": detail[:2000]}, default=str) + "\n")
+    except Exception as e:  # noqa: BLE001 — telemetry must never fail a run
+        try:
+            run_dir = RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            path = run_dir / f"step-{seq:02d}-{_step_slug(name)}.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"error": f"{type(e).__name__}: {e}"},
+                                   default=str) + "\n")
+        except Exception:
+            pass
+
+
+# --- reviewer grounding ---------------------------------------------------
+
+# Files the reviewer sees verbatim. Everything git tracks is in scope by
+# default (the review target is the working tree vs HEAD), but skip noise:
+# lockfiles, vendored deps, submodule contents (their dirt is the parent's
+# gitlink change, not reviewable text), and binary blobs.
+_REVIEW_SKIP_DIRS = {
+    ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
+    ".ruff_cache", ".tox", "dist", "build", "target",
+}
+
+
+def read_tree(workspace: Path, max_bytes: int = 220_000) -> str:
+    """Render the reviewable working tree as one verbatim text block.
+
+    The reviewer (NativeOutput) never calls its read tools, so this is the
+    ONLY thing that grounds it. Skips submodule working copies (their
+    content belongs to the parent's gitlink change, not reviewable text
+    here) and truncates tail-last at max_bytes.
+    """
+    # prune submodule working copies + skip dirs before walking
+    submods: set[Path] = set()
+    for cand in workspace.iterdir():
+        if cand.is_dir() and (cand / ".git").exists():
+            submods.add(cand)
+
+    out: list[str] = []
+    total = 0
+    # Recently-modified first: when the budget truncates, the files the
+    # implementer just touched are guaranteed to be in the render.
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    for path in sorted(workspace.rglob("*"), key=_mtime, reverse=True):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if any(part in _REVIEW_SKIP_DIRS for part in path.parts):
+            continue
+        if any(root in submods for root in path.parents):
+            continue  # inside a submodule working copy
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in data[:4096]:
+            continue  # binary
+        text = data.decode("utf-8", errors="replace")
+        # Per-file cap: one big data file must not crowd out the rest of
+        # the tree. Head kept, tail marked truncated.
+        file_cap = 25_000
+        if len(text) > file_cap:
+            text = text[:file_cap] + f"\n…[truncated {len(text) - file_cap} chars]"
+        chunk = f"--- FILE: {path.relative_to(workspace).as_posix()} ---\n{text}\n"
+        if total + len(chunk) > max_bytes:
+            continue
+        out.append(chunk)
+        total += len(chunk)
+    if not out:
+        return "(no reviewable files found)"
+    return "\n".join(out)
+
+
 async def run_step(
-    log: dict, roles: dict[str, str], name: str, agent: Agent, prompt: str
+    log: dict, roles: dict[str, str], name: str, agent: Agent, prompt: str,
+    run_id: str = "", seq: int = 0,
 ):
     """Run one agent step, log timing/usage, re-raise on failure."""
     t0 = dt.datetime.now()
@@ -217,6 +355,7 @@ async def run_step(
         )
         usage = result.usage
         out = result.output
+        dump_transcript(run_id, seq, name, result)
         log["steps"].append(
             {
                 "step": name,
@@ -243,9 +382,17 @@ async def run_pipeline(workspace: Path, task: str, max_revisions: int) -> int:
     # sourcebot run 20260819_063441_1c5766). No shell (bash/sh) — the
     # allowlist gates what the model can spawn directly.
     allowed = [
-        "python3", "python", "pytest", "uv", "make", "ruff",
-        "ls", "cat", "git", "grep", "rg", "find", "sed", "head", "tail",
-        "diff",
+        # build/verify
+        "make", "python3", "python", "pytest", "uv", "ruff",
+        # file ops
+        "ls", "cat", "cp", "mv", "rm", "mkdir", "find", "sort",
+        "uniq", "wc", "tr", "diff", "patch", "test", "touch",
+        # vcs
+        "git",
+        # inspection
+        "grep", "rg", "head", "tail", "file", "stat",
+        # network (read-only fetches for upstream comparison)
+        "curl", "wget",
     ]
     # uv must never sync the repo's own .venv: host checkouts symlink their
     # interpreter to host uv paths, invisible in-container; an in-place
@@ -267,9 +414,13 @@ async def run_pipeline(workspace: Path, task: str, max_revisions: int) -> int:
         "outcome": None,
     }
 
+    step_seq = 0
+
     async def step(name: str, agent: Agent, prompt: str):
-        out = await run_step(log, roles, name, agent, prompt)
-        return out
+        nonlocal step_seq
+        step_seq += 1
+        return await run_step(log, roles, name, agent, prompt,
+                              run_id=run_id, seq=step_seq)
 
     # 1. plan
     spec = await step("plan", planner(workspace), f"Task:\n{task}")
@@ -284,20 +435,44 @@ async def run_pipeline(workspace: Path, task: str, max_revisions: int) -> int:
     print(f"[{run_id}] code done")
 
     # 3. review (possibly repeated)
+    #
+    # REVIEWER GROUNDING (added 2026-08-19): with NativeOutput, the
+    # reviewer answers in a single completion and never calls its read
+    # tools — three false-fail verdicts were traced to this
+    # (20260819_071218_120ffe, 20260819_151342_d1109f, 20260819_160529_764f6d,
+    # all review request_tokens=1). Ground it with the tree state inline:
+    # the reviewer reads files verbatim from the prompt, never from memory.
+    tree = read_tree(workspace)
     verdict: Verdict = await step(
         "review",
         reviewer(workspace),
         f"Task:\n{task}\n\nSpec:\n{spec}\n\nImplementation report:\n{report}\n\n"
-        "Review the workspace state adversarially and return the verdict.",
+        f"WORKSPACE FILE CONTENTS (authoritative — verify claims against these "
+        f"verbatim; every finding MUST quote the exact line(s) from these files "
+        f"in its `quote` field; findings without a verbatim quote are invalid):\n\n"
+        f"{tree}\n\n"
+        "Review adversarially and return the verdict.",
     )
     print(f"[{run_id}] review: {verdict.verdict} — {verdict.summary[:200]}")
 
     revisions = 0
     while verdict.verdict == "fail" and revisions < max_revisions:
         revisions += 1
+        # Unquoted findings failed the grounding contract — treat as
+        # unverified and do not auto-revise on them (false-fail guard,
+        # 2026-08-19: all three false verdicts cited lines from memory).
+        grounded = [f for f in verdict.findings if f.quote.strip()]
         fixes = "\n".join(
-            f"- [{f.severity}] {f.file}: {f.description}" for f in verdict.findings
+            f"- [{f.severity}] {f.file}: {f.description}\n  quote: {f.quote}"
+            for f in grounded
         )
+        if not grounded:
+            print(
+                f"[{run_id}] review failed the change but produced NO grounded "
+                f"findings (all quotes empty) — not revising; treat as reviewer "
+                f"error and inspect manually."
+            )
+            break
         report = await step(
             f"code-rev{revisions}",
             implementer(workspace, allowed),
@@ -309,7 +484,12 @@ async def run_pipeline(workspace: Path, task: str, max_revisions: int) -> int:
             f"review-rev{revisions}",
             reviewer(workspace),
             f"Task:\n{task}\n\nSpec:\n{spec}\n\nPrior findings:\n{fixes}\n\n"
-            f"Revision report:\n{report}\n\nRe-review the workspace.",
+            f"Revision report:\n{report}\n\n"
+            f"WORKSPACE FILE CONTENTS (authoritative — verify claims against these "
+            f"verbatim; every finding MUST quote the exact line(s) from these files "
+            f"in its `quote` field; findings without a verbatim quote are invalid):\n\n"
+            f"{read_tree(workspace)}\n\n"
+            "Re-review the workspace.",
         )
         print(f"[{run_id}] re-review: {verdict.verdict}")
 

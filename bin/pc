@@ -12,6 +12,7 @@ Usage (surface identical to scripts/pc):
     pc [...] plan --workspace /work/<repo> --task - [--out <file>]
     pc [...] doctor
     pc [...] show <run-id>
+    pc [...] events <task-id> [--cursor N]
 
 --task accepts inline text, '-' (stdin, read here), or a /work-relative
 file path (the SERVICE reads files — no path is passed through to the
@@ -23,7 +24,9 @@ redacted) without sending anything.
 
 Live tasks: pc run / pc plan print the server-minted task_id to stderr
 line 1 as soon as it exists — a second terminal can run
-`pc status <task_id> --follow` immediately. pc tasks lists the registry;
+`pc status <task_id> --follow` immediately. pc events <task-id> streams
+the SSE tail (no rotation blind spot; resume with --cursor N from the
+status payload's cursor field). pc tasks lists the registry;
 pc cancel SIGTERMs a stuck task. On a client-side HTTP timeout pc NEVER
 auto-retries: the task may still be running server-side, and a re-dispatch
 would clobber the same working tree — it prints the task_id and a follow
@@ -62,6 +65,7 @@ USAGE = """usage: pc [--dry-run] [--timeout N] <pah-args...>
        pc show <run-id>
        pc tasks
        pc status <task-id> [--follow]
+       pc events <task-id> [--cursor N]
        pc cancel <task-id>"""
 
 
@@ -417,6 +421,61 @@ def cmd_status(args, dry_run: bool) -> int:
     return status_exit(payload)
 
 
+def cmd_events(args, dry_run: bool) -> int:
+    """Stream GET /events/<task_id> (SSE) until the task leaves `running`:
+    data frames print verbatim, gap/done frames print with a [pc] prefix,
+    and on done exit with the status-exit mapping (exit_code → 0/1/2/3)."""
+    path = f"/events/{args.task_id}"
+    if args.cursor > 0:
+        path += f"?cursor={args.cursor}"
+    if dry_run:
+        dry_run_print("GET", path, {})
+        return 0
+    base = os.environ.get("PC_URL", DEFAULT_URL).rstrip("/")
+    token = os.environ.get("PAH_TOKEN", "")
+    if not token:
+        die("PAH_TOKEN not set (the webui quadlet injects it)")
+    req = urllib.request.Request(base + path, method="GET")
+    req.add_header("X-PAH-Token", token)
+    req.add_header("Accept", "text/event-stream")
+    # 60s socket read timeout: the server beats every ~15s, so a stall past
+    # 60s means the stream is dead. This is a read timeout, not a run budget.
+    exit_code = None
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            event = None
+            for raw in resp:  # iterating an SSE response yields lines
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    data = line.split(":", 1)[1].lstrip(" ")
+                    if event == "gap":
+                        print(f"[pc] gap: {data} "
+                              f"(pc status {args.task_id} for the snapshot)")
+                        event = None
+                    elif event == "done":
+                        print(f"[pc] done: {data}")
+                        try:
+                            exit_code = json.loads(data).get("exit_code")
+                        except (json.JSONDecodeError, AttributeError):
+                            exit_code = None
+                        break
+                    else:
+                        print(data)
+                        event = None
+                # blank separators and ": keepalive" comments are ignored
+    except urllib.error.HTTPError as e:
+        return err_body_exit(e.code, e.read().decode("utf-8", "replace"))
+    except (TimeoutError, socket.timeout):
+        print("pc: SSE stream stalled (no frames within 60s)", file=sys.stderr)
+        return EXIT_INFRA
+    except urllib.error.URLError as e:
+        print(f"pc: cannot reach {base}{path}: {e.reason}", file=sys.stderr)
+        return EXIT_INFRA
+    return status_exit({"status": "done", "exit_code": exit_code})
+
+
 def cmd_cancel(args, dry_run: bool) -> int:
     path = f"/cancel/{args.task_id}"
     if dry_run:
@@ -451,7 +510,7 @@ def main() -> int:
         argv = argv[1:]
 
     if not argv or argv[0] not in ("run", "plan", "doctor", "show",
-                                   "tasks", "status", "cancel"):
+                                   "tasks", "status", "events", "cancel"):
         usage()
     sub = argv[0]
 
@@ -473,6 +532,10 @@ def main() -> int:
         ap.add_argument("--follow", action="store_true",
                         help="poll every 5s, print only new lines, until the "
                              "task leaves `running`")
+    if sub == "events":
+        ap.add_argument("task_id")
+        ap.add_argument("--cursor", type=int, default=0,
+                        help="resume after this line seq (pc status reports it)")
     if sub == "cancel":
         ap.add_argument("task_id")
     args = ap.parse_args(argv[1:])
@@ -489,6 +552,8 @@ def main() -> int:
         return cmd_tasks(dry_run)
     if sub == "status":
         return cmd_status(args, dry_run)
+    if sub == "events":
+        return cmd_events(args, dry_run)
     return cmd_cancel(args, dry_run)
 
 

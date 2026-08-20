@@ -12,6 +12,9 @@ Environment=ALIBABA_TOKEN_PLAN_API_KEY={{ALIBABA_TOKEN_PLAN_API_KEY}}
 # so pah/opencode/webui can all read the bind. rw so delegated tasks write
 # sibling repos (accepted stage-1 trade, see the spec's Security section).
 Volume={{PROJECT_MOUNT}}:/work:rw,z
+# opencode parity: the webui's /workspace (hermes-workspace) ro — lets
+# task/spec files be addressed as /workspace/... (resolve_task reads them).
+Volume={{REPO}}/hermes-workspace:/workspace:ro,z
 # Run records (records.jsonl) — the same named volume scripts/pc's runner uses.
 Volume=pah-runs:/opt/pah-driver/runs
 # No PublishPort (hermesnet-internal only), no socket mounts, no User/UserNS

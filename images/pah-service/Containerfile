@@ -13,8 +13,20 @@ LABEL description="PAH service: FastAPI front end for the vendored PAH driver (i
 
 USER root
 
-# git only: the implementer-role allowlist includes it, slim ships none.
-RUN apt-get update && apt-get install -y --no-install-recommends git make && rm -rf /var/lib/apt/lists/*
+# Toolchain for implementer-role verification commands. git/make: allowlist
+# basics slim ships none of. build-essential: native compiles + python
+# sdists that need a compiler. patch/curl: spec verification commands
+# (patch --dry-run, fetching upstream specs). U-Boot host deps: bison flex
+# swig bc device-tree-compiler libssl-dev libgnutls28-dev python3-dev
+# python3-setuptools. aarch64 cross: gcc/binutils-aarch64-linux-gnu so
+# `make CROSS_COMPILE=aarch64-linux-gnu-` can gate arm64 targets on this
+# x86_64 service container (CI still does the native arm64 build).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git make build-essential patch curl ca-certificates \
+    bison flex swig bc device-tree-compiler \
+    libssl-dev libgnutls28-dev python3-dev python3-setuptools \
+    gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
 
 # uv from the official distroless image — same pattern as images/opencode.
 # Coder-role verification commands (uv run pytest/ruff/ty, make lint) need it.
