@@ -16,6 +16,16 @@ Environment=CTX_SIZE=262144
 Environment=NP=2
 Environment=CACHE_TYPE_K=q4_0
 Environment=CACHE_TYPE_V=q4_0
+# Sampling: min_p=0.05 is llama-server's default; the Qwen3.8 card says 0.0
+# for both thinking and instruct modes. All other card values (temp=1.0,
+# top_p=0.95, top_k=20 for thinking mode) are already baked into the GGUF
+# metadata and apply automatically.
+Environment=MIN_P=0.0
+# MTP draft model for speculative decoding (~1.5-2x faster generation).
+# Set MTP_DRAFT_PATH empty to disable MTP (shell guard omits all flags).
+Environment=MTP_DRAFT_PATH=/models/mtp-Qwen3.8-27B-Q4_0.gguf
+Environment=SPEC_DRAFT_N_MAX=4
+Environment=SPEC_DRAFT_P_MIN=0.75
 # Pin ROCm to the R9700 (device_id 0x7551) via its KFD agent index. Both
 # GPUs are gfx1201, so the index is resolved by device_id in run.py (not by
 # generation). Do NOT set HIP_VISIBLE_DEVICES too: after the ROCR filter the
@@ -33,7 +43,9 @@ PublishPort=127.0.0.1:8090:8090
 
 [Service]
 Restart=always
-TimeoutStartSec=120
+# Loading 23 GB (weights + mmproj + MTP + 262K KV pool) can exceed 120s
+# on cold start. Raised from 120 to 180.
+TimeoutStartSec=180
 
 [Install]
 WantedBy=default.target

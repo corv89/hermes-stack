@@ -19,7 +19,11 @@
 
 ARG ROCM_VERSION=7.2.1
 # llama.cpp revision to build — pinned for reproducibility; bump deliberately.
-ARG LLAMA_REV=9d57ce456c94d241dde672b2db9cf18879766568
+# v0.1.2 (1511ce3, 2026-08-18): includes yield_to_queue thread-model redesign
+# (22b8e31) that moves speculative processing to a worker thread — required for
+# stable MTP + continuous batching under -np 2. Also includes 5f754ea
+# (--models-dir MTP loading, additive). Previous pin 9d57ce45 predated both.
+ARG LLAMA_REV=1511ce3bc3f087376c8526b4ad07100bfabb277f
 
 # --- Builder stage ---
 FROM docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete AS builder
@@ -100,22 +104,33 @@ ENV PORT=8090
 # Clean model id for OpenAI-compatible clients (else the raw GGUF path is
 # served). Hermes references the model by this name (see run.py config).
 ENV MODEL_ALIAS=qwen3.8-27b
-# Thinking-model handling: auto = detect <think> tags and route them to
+# Thinking-model handling: auto = detect  tags and route them to
 # reasoning_content (Thinking ON). Set REASONING_FORMAT=none to disable
 # thinking and send all tokens to content (faster, weaker reasoning).
 ENV REASONING_FORMAT=auto
 
-# MTP flags intentionally NOT added: Qwen3.8 ships MTP-trained, but the GGUF
-# here is not an MTP-UD variant; verify a future MTP-UD release separately.
+# Sampling: GGUF metadata bakes in temp=1.0, top_p=0.95, top_k=20 (thinking
+# mode per model card). llama-server's own default min_p is 0.05; the card
+# says 0.0 — pin it explicitly. Instruct-mode values (temp=0.7, top_p=0.80,
+# presence_penalty=1.5) are per-request only; thinking mode is the default.
+ENV MIN_P=0.0
+# MTP (Multi-Token Prediction) draft model for speculative decoding.
+# The MTP file contains prediction heads separate from the main weights.
+# Set MTP_DRAFT_PATH empty to disable MTP (the shell guard omits all flags).
+ENV MTP_DRAFT_PATH=/models/mtp-Qwen3.8-27B-Q4_0.gguf
+ENV SPEC_DRAFT_N_MAX=4
+ENV SPEC_DRAFT_P_MIN=0.75
 CMD ["sh", "-c", "llama-server \
   -m ${MODEL_PATH} \
   ${MMPROJ_PATH:+--mmproj ${MMPROJ_PATH}} \
+  ${MTP_DRAFT_PATH:+--spec-draft-model ${MTP_DRAFT_PATH} --spec-type draft-mtp --spec-draft-n-max ${SPEC_DRAFT_N_MAX} --spec-draft-p-min ${SPEC_DRAFT_P_MIN}} \
   --host ${HOST} \
   --port ${PORT} \
   -ngl ${N_GPU_LAYERS} \
   -c ${CTX_SIZE} \
   -np ${NP} \
   -t 4 \
+  --min-p ${MIN_P} \
   --cont-batching \
   --alias ${MODEL_ALIAS} \
   --reasoning-format ${REASONING_FORMAT} \
