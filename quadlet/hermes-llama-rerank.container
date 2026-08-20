@@ -1,11 +1,11 @@
 [Unit]
-Description=llama.cpp reranker - Qwen3-Reranker-4B (ROCm on RX 9070 XT)
+Description=llama.cpp reranker - Qwen3-Reranker-4B (ROCm, aux GPU)
 
 [Container]
 ContainerName=hermes-llama-rerank
 Image=localhost/llamacpp-sidecar:latest
 Network=hermesnet.network
-# Pin to the RX 9070 XT (device_id 0x7550); see hermes-llama-embed.container.
+# Pin to the aux GPU (device_id from GPU_DEV_ID_AUX); see hermes-llama-embed.container.
 Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX_AUX}}
 AddDevice=/dev/kfd
 AddDevice=/dev/dri

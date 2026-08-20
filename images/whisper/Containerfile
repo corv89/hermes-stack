@@ -47,7 +47,7 @@ WORKDIR /app
 
 # Build whisper-server with Vulkan backend.
 # GGML_VULKAN=ON enables the Vulkan compute backend (Mesa RADV on AMD).
-# This is independent of ROCm — no HIP, no version conflict with the R9700.
+# This is independent of ROCm — no HIP, no version conflict with the sidecar.
 RUN cmake -S . -B build \
         -DGGML_VULKAN=ON \
         -DWHISPER_BUILD_SERVER=ON \

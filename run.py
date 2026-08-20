@@ -28,19 +28,20 @@ Usage:
 
 Startup order (systemd-ordered + readiness gates):
   opencode (fatal) -> sidecar (model loads in background)
-  -> llama-embed + llama-rerank (ROCm on RX 9070 XT) -> gbrain-pg -> gbrain
+  -> llama-embed + llama-rerank (ROCm, aux GPU) -> gbrain-pg -> gbrain
   -> config-sync (mints the gbrain MCP token, merges config.yaml)
-  -> hermes-webui -> searxng/trafilatura/playwright -> sourcebot
+  -> hermes-webui -> searxng/trafilatura/playwright -> sourcebot (optional)
 
 Failure policy: only opencode + webui are fatal (the core stack). Everything
 else is warn-and-continue so an add-on hiccup never blocks it.
 
 GPU layout (dual-GPU host, both gfx1201/RDNA4 — pinned by PCI device id, not
 by gfx generation, since both cards share gfx1201 and KFD agent order is not
-stable across hardware changes):
-  RX 9070 XT (gfx1201, 16GB) @ 06:00.0 - embed + rerank (llama.cpp ROCm)
-  R9700      (gfx1201, 32GB) @ 0e:00.0 - sidecar 35B-A3B MoE (ROCm)
-  whisper.cpp runs its Vulkan build on the 9070 XT render node.
+stable across hardware changes). Addresses and ids are overridable via .env
+(GPU_PCI_AUX / GPU_PCI_ROCM / GPU_DEV_ID_AUX / GPU_DEV_ID_SIDECAR):
+  aux GPU     (gfx1201) - embed + rerank (llama.cpp ROCm)
+  sidecar GPU (gfx1201) - sidecar LLM (ROCm); whisper.cpp Vulkan runs on the
+  aux GPU render node.
 """
 from __future__ import annotations
 
@@ -110,13 +111,18 @@ LLAMA_IMAGE_ROCM = "localhost/llamacpp-sidecar:latest"
 
 # --- GPU topology (dual-GPU host, both gfx1201/RDNA4) -------------------------
 # Workloads are pinned by PCI device_id because KFD agent order is not stable
-# across hardware changes: the Vega->9070 XT swap left two identical gfx1201
-# cards, which broke the old "first gfx1201 == R9700" assumption and silently
-# mis-pinned the 35B MoE onto the 16GB card.
-GPU_PCI_AUX = "0000:06:00.0"      # RX 9070 XT (gfx1201, 16GB) - embed/rerank/whisper
-GPU_PCI_ROCM = "0000:0e:00.0"     # R9700      (gfx1201, 32GB) - MoE sidecar
-GPU_DEV_ID_AUX = 0x7550           # KFD device_id of the RX 9070 XT
-GPU_DEV_ID_SIDECAR = 0x7551       # KFD device_id of the R9700
+# across hardware changes: a card swap once left two identical gfx1201 cards,
+# which broke the old "first gfx1201 == the big card" assumption and silently
+# mis-pinned the sidecar onto the 16GB card.
+#
+# Machine-specific: the PCI addresses and KFD device_ids below are defaults
+# for the reference host. On a different box, override them in .env (same
+# names, e.g. GPU_PCI_AUX=0000:01:00.0). `lspci | grep -i vga` shows the PCI
+# BDF; `cat /sys/class/kfd/kfd/topology/nodes/*/properties` shows device_ids.
+GPU_PCI_AUX = os.environ.get("GPU_PCI_AUX", "0000:06:00.0")           # aux GPU - embed/rerank/whisper
+GPU_PCI_ROCM = os.environ.get("GPU_PCI_ROCM", "0000:0e:00.0")        # sidecar GPU
+GPU_DEV_ID_AUX = int(os.environ.get("GPU_DEV_ID_AUX", "0x7550"), 16)          # KFD device_id, aux GPU
+GPU_DEV_ID_SIDECAR = int(os.environ.get("GPU_DEV_ID_SIDECAR", "0x7551"), 16)  # KFD device_id, sidecar GPU
 
 
 def render_node(pci_addr: str) -> str:
@@ -138,8 +144,8 @@ def _safe_render_node(pci_addr: str) -> str:
 
 def rocm_agent_index(device_id: int) -> str:
     """GPU agent index (for ROCR_VISIBLE_DEVICES) of the KFD topology node
-    matching a PCI device_id (e.g. 0x7551 for the R9700). CPU nodes
-    (gfx_target_version 0) are skipped.
+    matching a PCI device_id (e.g. the sidecar GPU id, GPU_DEV_ID_SIDECAR).
+    CPU nodes (gfx_target_version 0) are skipped.
 
     Pinned by device_id rather than gfx_target_version because this host runs
     two GPUs of the same generation (gfx1201); KFD agent order is not stable
@@ -184,7 +190,7 @@ SENSITIVE = {
 # {gbrain_token} placeholder is replaced with a freshly minted MCP token).
 #
 # Model topology — LOCAL-FIRST with cloud escalation:
-#   * Primary is the on-box ROCm sidecar (Qwen3.6-35B-A3B on the R9700), exposed
+#   * Primary is the on-box ROCm sidecar (local model on the sidecar GPU), exposed
 #     as an OpenAI-compatible endpoint and registered as a named custom
 #     provider `sidecar`. model.provider: custom:sidecar selects it.
 #   * fallback_providers is Hermes' ordered failover chain, tried when the
@@ -1045,9 +1051,9 @@ def banner(cfg: dict[str, str]) -> None:
     log("Trafilatura: http://127.0.0.1:8100")
     log("Playwright:  http://127.0.0.1:8101")
     log("gbrain MCP:  http://127.0.0.1:8083/mcp")
-    log("Embeddings:  http://127.0.0.1:8084/v1  (ROCm/RX 9070 XT)")
-    log("Reranker:    http://127.0.0.1:8085/v1  (ROCm/RX 9070 XT)")
-    log("Sidecar:     http://127.0.0.1:8090     (ROCm/R9700)")
+    log("Embeddings:  http://127.0.0.1:8084/v1  (ROCm, aux GPU)")
+    log("Reranker:    http://127.0.0.1:8085/v1  (ROCm, aux GPU)")
+    log("Sidecar:     http://127.0.0.1:8090     (ROCm, sidecar GPU)")
     log("Node exp:  http://127.0.0.1:9100/metrics  (host telemetry)")
     log("GPU exp:   http://127.0.0.1:9101/metrics  (AMD GPU stats)")
     log("Podman exp: http://127.0.0.1:9102/metrics (container stats)")

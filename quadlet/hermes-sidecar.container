@@ -1,5 +1,5 @@
 [Unit]
-Description=llama.cpp sidecar - Qwen3.8-27B dense VLM (ROCm on R9700)
+Description=llama.cpp sidecar - Qwen3.8-27B dense VLM (ROCm, sidecar GPU)
 
 [Container]
 ContainerName=hermes-sidecar
@@ -11,7 +11,7 @@ Environment=MMPROJ_PATH=/models/mmproj-F16.gguf
 # coding alongside Sourcebot phases running in parallel. Two slots cover
 # the real contention pattern (Hermes + Sourcebot). Dense GDN hybrid
 # keeps KV small.
-# embed/rerank run on the 9070 XT, so the R9700 is the sidecar's alone.
+# embed/rerank run on the aux GPU, so this card is the sidecar's alone.
 Environment=CTX_SIZE=262144
 Environment=NP=2
 Environment=CACHE_TYPE_K=q4_0
@@ -26,14 +26,15 @@ Environment=MIN_P=0.0
 Environment=MTP_DRAFT_PATH=/models/mtp-Qwen3.8-27B-Q4_0.gguf
 Environment=SPEC_DRAFT_N_MAX=4
 Environment=SPEC_DRAFT_P_MIN=0.75
-# Pin ROCm to the R9700 (device_id 0x7551) via its KFD agent index. Both
-# GPUs are gfx1201, so the index is resolved by device_id in run.py (not by
-# generation). Do NOT set HIP_VISIBLE_DEVICES too: after the ROCR filter the
-# R9700 is device 0, so a second filter selects nothing.
+# Pin ROCm to the sidecar GPU (device_id from GPU_DEV_ID_SIDECAR) via its KFD
+# agent index. Both GPUs are gfx1201, so the index is resolved by device_id
+# in run.py (not by generation). Do NOT set HIP_VISIBLE_DEVICES too: after
+# the ROCR filter the sidecar GPU is device 0, so a second filter selects
+# nothing.
 Environment=ROCR_VISIBLE_DEVICES={{ROCR_INDEX_SIDECAR}}
 Volume={{HOME}}/models:/models:ro
 # Full /dev/dri is required: the ROCm runtime fails agent/node mapping
-# when only the R9700 render node is passed (verified).
+# when only the sidecar GPU render node is passed (verified).
 AddDevice=/dev/kfd
 AddDevice=/dev/dri
 GroupAdd=video
