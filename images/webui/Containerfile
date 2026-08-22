@@ -47,6 +47,14 @@ RUN ln -s /usr/local/lib/hermes-agent /opt/hermes
 RUN uv pip install --python /usr/local/lib/hermes-agent/venv/bin/python \
       -e '/usr/local/lib/hermes-agent[all,messaging,voice]'
 
+# Bake the dashboard frontend (hermes_cli/web_dist) so `hermes dashboard
+# --skip-build` can serve a prebuilt dist at runtime. Must run as root here:
+# the runtime user cannot write the root-owned web/ tree (EACCES), and the
+# runtime first-launch build path fails for the same reason.
+RUN cd /usr/local/lib/hermes-agent \
+    && npm_config_cache=/tmp/.npm-cache npm run build -w web \
+    && test -f hermes_cli/web_dist/index.html
+
 # Voice channel dependencies: opus codec (Discord VC playback),
 # ffmpeg (audio conversion), portaudio (microphone input).
 RUN apt-get update \
@@ -116,6 +124,28 @@ if gw_anchor in c and 'Starting messaging gateway' not in c:
     print("patched: gateway auto-start before webui server")
 else:
     print("WARNING: gateway auto-start anchor not found / already patched")
+# (5) auto-start the dashboard backend (Desktop Remote Gateway, port 9119)
+# when HERMES_DASHBOARD=1. --skip-build: dist baked at image build; the
+# runtime user cannot build into the root-owned web/ tree. Non-loopback
+# bind requires the basic-auth env (set in the quadlet); without an auth
+# provider the dashboard fails closed by design.
+db_anchor = 'echo ""; echo "== Running hermes-webui"'
+db_block = ('# Auto-start the dashboard backend (Hermes Desktop Remote Gateway)' + NL
+            + '# on :9119. Gated on HERMES_DASHBOARD=1; credentials arrive via' + NL
+            + '# HERMES_DASHBOARD_BASIC_AUTH_* container env (non-loopback bind' + NL
+            + '# fails closed without an auth provider). --skip-build serves the' + NL
+            + '# dist baked at image build time.' + NL
+            + 'if [ "${HERMES_DASHBOARD:-}" = "1" ]; then' + NL
+            + '    echo ""; echo "== Starting dashboard backend (background)"' + NL
+            + '    nohup hermes dashboard --host 0.0.0.0 --port 9119 --no-open --skip-build \\' + NL
+            + '        >> "$HOME/.hermes/logs/dashboard.log" 2>&1 &' + NL
+            + '    echo "   dashboard pid: $!"' + NL
+            + 'fi' + NL)
+if db_anchor in c and 'Starting dashboard backend' not in c:
+    c = c.replace(db_anchor, db_block + db_anchor, 1)
+    print("patched: dashboard auto-start before webui server")
+else:
+    print("WARNING: dashboard auto-start anchor not found / already patched")
 p.write_text(c)
 PYEOF
 

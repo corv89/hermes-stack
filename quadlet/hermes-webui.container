@@ -23,6 +23,13 @@ Environment=HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
 Environment=HERMES_WEBUI_AUTO_INSTALL=1
 Environment=HERMES_WEBUI_AGENT_DIR=/usr/local/lib/hermes-agent
 Environment=HERMES_WEBUI_PASSWORD={{HERMES_WEBUI_PASSWORD}}
+# Dashboard backend (Hermes Desktop Remote Gateway attach point).
+Environment=HERMES_DASHBOARD=1
+Environment=HERMES_DASHBOARD_HOST=0.0.0.0
+Environment=HERMES_DASHBOARD_PORT=9119
+Environment=HERMES_DASHBOARD_BASIC_AUTH_USERNAME={{HERMES_DASHBOARD_BASIC_AUTH_USERNAME}}
+Environment=HERMES_DASHBOARD_BASIC_AUTH_PASSWORD={{HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}}
+Environment=HERMES_DASHBOARD_BASIC_AUTH_SECRET={{HERMES_DASHBOARD_BASIC_AUTH_SECRET}}
 Environment=OPENCODE_SERVER_URL=http://hermes-opencode:45650
 Environment=OPENCODE_SERVER_USER=opencode
 Environment=OPENCODE_SERVER_PASS={{OPENCODE_PASSWORD}}
@@ -43,6 +50,7 @@ Volume={{PROJECT_MOUNT}}:/work:ro,z
 Volume={{REPO}}/hermes-workspace:/workspace:rw,z
 Volume=pah-runs:/pah-runs:ro,z
 PublishPort=127.0.0.1:8787:8787
+PublishPort=127.0.0.1:9119:9119
 
 [Service]
 Restart=on-failure

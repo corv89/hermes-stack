@@ -226,7 +226,17 @@ Detailed setup and operations are in [`docs/`](docs/):
 sudo tailscale set --operator=$USER          # one-time, enables sudo-free serve
 tailscale serve --bg 8787                     # Hermes  -> https://<host>/
 tailscale serve --bg --https=8443 8181        # Sourcebot -> https://<host>:8443
+tailscale serve --bg --https=9443 9119        # Dashboard (Desktop Remote GW) -> https://<host>:9443
 ```
+
+### Hermes Desktop (Remote Gateway)
+
+The dashboard backend in the webui container (`:9119`, basic-auth gated) is
+what the Hermes Desktop app attaches to via Settings → Gateways → Remote
+gateway. Point it at `https://<host>:9443` (or `http://<tailscale-ip>:9119`)
+and sign in with the `HERMES_DASHBOARD_BASIC_AUTH_*` values from `.env`.
+Health check: `curl -s https://<host>:9443/api/status` → `auth_required: true`,
+providers `["basic"]`.
 
 ## Related: CasadoraOS
 

@@ -187,6 +187,8 @@ SENSITIVE = {
     "GBRAIN_ADMIN_BOOTSTRAP_TOKEN",
     "GBRAIN_ADMIN_TOKEN",
     "FORGEJO_ADMIN_PASSWORD",
+    "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+    "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
 }
 
 # Deep-merged into the Hermes config.yaml on the hermes-data volume (the
@@ -431,6 +433,7 @@ GATES = [
     ("hermes-sourcebot",  "http://127.0.0.1:8181/",                        60,  False, False),
     ("hermes-forgejo",    "http://127.0.0.1:3000/",                        120, False, False),
     ("hermes-webui",      "http://127.0.0.1:8787/",                        180, False, True),
+    ("hermes-dashboard",   "http://127.0.0.1:9119/api/status",              120,  False, True),
     ("hermes-node-exporter", "http://127.0.0.1:9100/metrics", 30, False, False),
     ("hermes-gpu-exporter", "http://127.0.0.1:9101/metrics", 30, False, False),
     ("hermes-podman-exporter", "http://127.0.0.1:9102/metrics", 30, False, False),
@@ -523,6 +526,12 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         # fallback pattern); hermes-pah and the webui render together in this
         # one pass, so the pair always matches.
         "PAH_TOKEN": cfg.get("PAH_TOKEN") or secrets.token_hex(20),
+        # Dashboard basic auth (Desktop Remote Gateway). REQUIRED, not minted:
+        # a re-minted secret on redeploy would invalidate Desktop's saved
+        # sign-in, so fail fast instead of auto-generating.
+        "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": cfg["HERMES_DASHBOARD_BASIC_AUTH_USERNAME"],
+        "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": cfg["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"],
+        "HERMES_DASHBOARD_BASIC_AUTH_SECRET": cfg["HERMES_DASHBOARD_BASIC_AUTH_SECRET"],
     }
     if not sourcebot_root(cfg).is_dir():
         log(f"  sourcebot: {sourcebot_root(cfg)} not found — skipping the "
@@ -1064,7 +1073,10 @@ def codechecker_bootstrap(cfg: dict[str, str]) -> None:
 def load_cfg() -> dict[str, str]:
     cfg = load_env(SCRIPT_DIR / ".env")
     for key in ("OPENCODE_SERVER_PASSWORD", "HERMES_WEBUI_PASSWORD",
-                "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN", "FORGEJO_ADMIN_PASSWORD"):
+                "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN", "FORGEJO_ADMIN_PASSWORD",
+                "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
+                "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+                "HERMES_DASHBOARD_BASIC_AUTH_SECRET"):
         if not cfg.get(key):
             log(f"ERROR: {key} must be set in .env")
             sys.exit(1)
