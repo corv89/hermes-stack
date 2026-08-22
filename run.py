@@ -70,7 +70,7 @@ QUADLET_SRC = SCRIPT_DIR / "quadlet"
 UNIT_DIR = Path.home() / ".config" / "containers" / "systemd"
 # Plain systemd units (non-quadlet) live in the regular user unit dir.
 SYSTEMD_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
-PROJECT_MOUNT = os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src"))
+PROJECT_MOUNT = Path(os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src")))
 GBRAIN_DATA_DIR = Path(os.environ.get("GBRAIN_DATA_DIR", "/opt/gbrain-data"))
 # Forgejo data dir is created once by the user with sudo (the container's
 # entrypoint must chown it); run.py only warns when it is absent.
