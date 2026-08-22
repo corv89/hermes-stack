@@ -63,7 +63,7 @@ the WebUI image teach Hermes these flows.
 ## Quickstart
 
 ```bash
-cp .env.example .env       # fill in the five required values
+cp .env.example .env       # fill in the eight required values
 python3 run.py --build     # build the images (once)
 python3 run.py             # render units, start the stack, run readiness gates
 ```
