@@ -160,9 +160,11 @@ Wiring lives in `HERMES_CONFIG_YAML` in `run.py` (deep-merged into
 
 ## Secrets
 
-Five keys in `.env` (see `.env.example`): `HERMES_WEBUI_PASSWORD`,
+Eight keys in `.env` (see `.env.example`): `HERMES_WEBUI_PASSWORD`,
 `ZAI_API_KEY`, `OPENCODE_ZHIPU_API_KEY`, `OPENCODE_SERVER_PASSWORD`,
-`GBRAIN_ADMIN_TOKEN`. Plus `FORGEJO_ADMIN_PASSWORD` if you enable the forge.
+`GBRAIN_ADMIN_TOKEN`, `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`,
+`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`, `HERMES_DASHBOARD_BASIC_AUTH_SECRET`.
+Plus `FORGEJO_ADMIN_PASSWORD` if you enable the forge.
 
 Podman secrets (sourcebot API keys, gbrain Postgres password) are created
 out-of-band:
