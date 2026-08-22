@@ -1,0 +1,29 @@
+[Unit]
+Description=CodeChecker static analysis server (C/C++ analysis results)
+After=network-online.target hermes-gbrain-pg.service
+Wants=network-online.target
+
+[Container]
+ContainerName=hermes-codechecker
+Image=codechecker/codechecker-web:6.28.2
+Network=hermesnet.network
+# The image has NO env-based DB config (verified against v6.28.2
+# entrypoint). Postgres wiring is CLI flags; Exec= overrides the default
+# SQLite CMD. Config DB lives on hermes-gbrain-pg.
+Exec=CodeChecker server --workspace /workspace --postgresql --dbaddress hermes-gbrain-pg --dbport 5432 --dbusername codechecker --dbname codechecker_config --not-host-only
+# Trust auth for hermesnet peers (same convention as the gbrain-pg quadlet
+# comment) — the codechecker role connects password-less; no pgpass needed.
+# Rootless userns default (in-container root = host uid) — same precedent
+# as pah-service. No UserNS/User lines.
+Volume=/opt/codechecker/workspace:/workspace:Z
+# hermesnet-internal for CI containers; loopback-publish for the browser.
+PublishPort=127.0.0.1:8001:8001
+
+[Service]
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Install]
+WantedBy=default.target

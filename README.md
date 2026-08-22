@@ -101,6 +101,7 @@ comes up at boot.
 | Add-on | `sourcebot` | `sourcebot` * | 8181 | research pipeline (optional, private image) |
 | Add-on | `hermes-forgejo` | `forgejo/forgejo:15` | 3000 | git forge + Actions CI |
 | Add-on | `hermes-forgejo-runner` | `forgejo/runner:13` | - | Actions runner |
+| Add-on | `hermes-codechecker` | `codechecker/codechecker-web:6.28.2` | 8001 | C/C++ static analysis (CodeChecker) |
 | Add-on | `hermes-node-exporter` | `prometheus/node-exporter` | 9100 | host telemetry (read-only) |
 | Add-on | `hermes-gpu-exporter` | built: `images/gpu-exporter` | 9101 | AMD GPU metrics (read-only) |
 | Add-on | `hermes-podman-exporter` | `navidys/prometheus-podman-exporter` | 9102 | container stats (read-only) |
@@ -184,6 +185,30 @@ Browse and edit directly, no FUSE/bindfs shim:
 ~/hermes-workspace -> <repo>/hermes-workspace
 ```
 
+## Static analysis (CodeChecker)
+
+`hermes-codechecker` runs self-hosted [CodeChecker] as the stack's C/C++
+static-analysis leg: clang-tidy + the Clang Static Analyzer over compile
+databases, with stored runs and run-to-run diffs in the browser. Python
+repos stay on ruff/ty/pytest — this platform is for C/C++ only.
+
+- **Consumers**: casadora-uboot (diff-scoped analysis of the v2026.07 patch
+  set) now; ESP32 firmware and out-of-tree kernel modules planned.
+- **URL**: http://127.0.0.1:8001, product `Default` (loopback-published for
+  the browser; hermesnet-internal for CI containers).
+- **Database convention**: two databases on `hermes-gbrain-pg` —
+  `codechecker_config` (server config/products) and `default_product` (the
+  Default product's runs) — role `codechecker` with trust auth, the same
+  boundary as the gbrain Postgres quadlet (5432 is not host-published).
+  No `.env` keys, no podman secrets.
+- **Host prep**: `/opt/codechecker/workspace` (mode 0700, stack-user owned).
+  `run.py` creates it when `/opt/codechecker` permits; otherwise the one-time
+  sudo command is in run.py's warning.
+
+`run.py` bootstraps it idempotently (role + databases, unit start, `/ready`
+wait, product registration, endpoint check) and warn-and-continue: a
+CodeChecker failure never blocks the core stack.
+
 ## Operational guides
 
 Detailed setup and operations are in [`docs/`](docs/):
@@ -217,3 +242,4 @@ configuration, but a promising direction.
 
 [Podman]: https://podman.io
 [Forgejo]: https://forgejo.org
+[CodeChecker]: https://codechecker.readthedocs.io

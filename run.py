@@ -76,6 +76,9 @@ GBRAIN_DATA_DIR = Path(os.environ.get("GBRAIN_DATA_DIR", "/opt/gbrain-data"))
 # entrypoint must chown it); run.py only warns when it is absent.
 FORGEJO_DATA_DIR = Path("/opt/forgejo-data")
 FORGEJO_RUNNER_DIR = Path("/opt/forgejo-runner")
+# Host path for the CodeChecker server workspace (deliberately NOT under
+# GBRAIN_DATA_DIR — analysis artifacts are their own tree).
+CODECHECKER_WORKSPACE_DIR = Path("/opt/codechecker/workspace")
 HERMES_DATA_VOL = (Path.home() /
                    ".local/share/containers/storage/volumes/hermes-data/_data")
 
@@ -406,7 +409,12 @@ CONFIG_SYNC_UNIT = "hermes-config-sync"
 # file exists, so forgejo_bootstrap() starts it explicitly. It belongs in
 # ALL_UNITS so --stop/--redeploy cover it.
 FORGEJO_RUNNER_UNIT = "hermes-forgejo-runner"
-ALL_UNITS = CONTAINER_UNITS + [CONFIG_SYNC_UNIT, FORGEJO_RUNNER_UNIT]
+# Same shape as the runner: codechecker can only start once its Postgres
+# role + databases exist, so codechecker_bootstrap() starts it explicitly.
+# It belongs in ALL_UNITS so --stop/--redeploy/status cover it.
+CODECHECKER_UNIT = "hermes-codechecker"
+ALL_UNITS = CONTAINER_UNITS + [CONFIG_SYNC_UNIT, FORGEJO_RUNNER_UNIT,
+                               CODECHECKER_UNIT]
 
 # Readiness gates, checked from the host against the localhost-published ports.
 # (name, url or "pg", timeout_s, require_2xx, fatal)
@@ -959,6 +967,99 @@ def forgejo_bootstrap(cfg: dict[str, str]) -> None:
         log(f"WARN: Forgejo bootstrap failed: {e}")
 
 
+# --- codechecker ---------------------------------------------------------------
+# Idempotent \gexec SQL: each guard SELECT emits the DDL string only when the
+# object is missing; \gexec executes what was selected (no rows = no-op).
+_CODECHECKER_DB_SQL = """\
+SELECT 'CREATE ROLE codechecker LOGIN'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'codechecker')\\gexec
+SELECT 'CREATE DATABASE codechecker_config'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'codechecker_config')\\gexec
+SELECT 'CREATE DATABASE default_product'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'default_product')\\gexec
+GRANT ALL PRIVILEGES ON DATABASE codechecker_config TO codechecker;
+GRANT ALL PRIVILEGES ON DATABASE default_product TO codechecker;
+"""
+
+# PG15+ gotcha: non-owners have no CREATE on schema public — without this
+# grant CodeChecker's first table creation fails ("permission denied for
+# schema public"). Needed in EACH database.
+_CODECHECKER_SCHEMA_GRANT_SQL = "GRANT ALL ON SCHEMA public TO codechecker;\n"
+
+
+def codechecker_bootstrap(cfg: dict[str, str]) -> None:
+    """Idempotent CodeChecker role/database/product bootstrap.
+
+    Static analysis is an add-on: every step is warn-and-continue, nothing
+    here is ever fatal to the core stack (forgejo_bootstrap precedent).
+    cfg is unused today; kept for call-site symmetry."""
+    try:
+        if not CODECHECKER_WORKSPACE_DIR.is_dir():
+            log(f"WARN: {CODECHECKER_WORKSPACE_DIR} missing — CodeChecker "
+                "bootstrap skipped (one-time host prep, README → Static "
+                "analysis)")
+            return
+        if not pg_ready():
+            log("WARN: hermes-gbrain-pg not ready — CodeChecker "
+                "bootstrap skipped")
+            return
+
+        psql = ["podman", "exec", "-i", "hermes-gbrain-pg", "psql", "-U", "gbrain"]
+        run(psql + ["-d", "postgres"], input_text=_CODECHECKER_DB_SQL)
+        for db in ("codechecker_config", "default_product"):
+            run(psql + ["-d", db], input_text=_CODECHECKER_SCHEMA_GRANT_SQL)
+        log("  CodeChecker role + databases ensured (codechecker_config, "
+            "default_product)")
+
+        # Start the unit (not in CONTAINER_UNITS — runner precedent).
+        svc = CODECHECKER_UNIT + ".service"
+        if systemctl_user("is-failed", svc, check=False).returncode == 0:
+            systemctl_user("reset-failed", svc, check=False)
+        if not unit_active(svc):
+            systemctl_user("start", svc)
+
+        # /ready returns 200 + CODECHECKER_SERVER_IS_READY once the DB is
+        # reachable. Non-fatal gate: skip registration if it never comes up.
+        if not wait_gate(CODECHECKER_UNIT, "http://127.0.0.1:8001/ready",
+                         90, True, False):
+            log("WARN: CodeChecker /ready gate failed — product "
+                "registration skipped")
+            return
+
+        # The Default product is NOT auto-created in Postgres mode.
+        r = run(["podman", "exec", CODECHECKER_UNIT, "CodeChecker", "cmd",
+                 "products", "list"], check=False, quiet=True)
+        if "Default" in (r.stdout or ""):
+            log("  CodeChecker product 'Default' already registered")
+        else:
+            r = run(["podman", "exec", CODECHECKER_UNIT, "CodeChecker", "cmd",
+                     "products", "add", "Default",
+                     "--name", "Default Product", "--postgresql",
+                     "--db-host", "hermes-gbrain-pg", "--db-port", "5432",
+                     "--db-username", "codechecker",
+                     "--db-name", "default_product"], check=False, quiet=True)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip().splitlines()
+                log(f"WARN: CodeChecker products add Default: "
+                    f"{err[0] if err else 'exit ' + str(r.returncode)}")
+            else:
+                log("  CodeChecker product 'Default' registered")
+
+        if http_up("http://127.0.0.1:8001/Default"):
+            log("  CodeChecker product endpoint "
+                "http://127.0.0.1:8001/Default live")
+        else:
+            log("  product endpoint not live yet — restarting once ...")
+            systemctl_user("restart", svc, check=False)
+            wait_gate(CODECHECKER_UNIT, "http://127.0.0.1:8001/ready",
+                      90, True, False)
+            if not http_up("http://127.0.0.1:8001/Default"):
+                log("WARN: http://127.0.0.1:8001/Default not responding "
+                    "(continuing)")
+    except Exception as e:  # add-on: never fatal to the core stack
+        log(f"WARN: CodeChecker bootstrap failed: {e}")
+
+
 # --- orchestration ------------------------------------------------------------
 def load_cfg() -> dict[str, str]:
     cfg = load_env(SCRIPT_DIR / ".env")
@@ -985,6 +1086,17 @@ def prepare_dirs() -> None:
     except OSError as e:
         log(f"WARN: could not prepare Forgejo runner dirs ({e}); "
             "see README → Forgejo (git forge) host prep")
+
+    # CodeChecker workspace (host path owned by the stack user, NOT under
+    # GBRAIN_DATA_DIR). /opt may be root-owned on a fresh host: this warns
+    # like the Forgejo prep and the one-time sudo command is in the message.
+    try:
+        CODECHECKER_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        CODECHECKER_WORKSPACE_DIR.chmod(0o700)
+    except OSError as e:
+        log(f"WARN: could not prepare {CODECHECKER_WORKSPACE_DIR} ({e}); "
+            "one-time host prep: sudo mkdir -p /opt/codechecker/workspace"
+            f' && sudo chown -R "$USER" /opt/codechecker')
 
 
 def start_stack(cfg: dict[str, str]) -> None:
@@ -1017,6 +1129,9 @@ def start_stack(cfg: dict[str, str]) -> None:
     log("Forgejo bootstrap ...")
     forgejo_bootstrap(cfg)
 
+    log("CodeChecker bootstrap ...")
+    codechecker_bootstrap(cfg)
+
     banner(cfg)
 
 
@@ -1035,7 +1150,7 @@ def redeploy(cfg: dict[str, str]) -> None:
                  "hermes-llama-rerank", "hermes-gbrain-pg", "hermes-gbrain",
                  "hermes-searxng", "hermes-trafilatura", "hermes-playwright",
                  "sourcebot", "hermes-webui",  # rm -f is a no-op when absent
-                 "hermes-forgejo", FORGEJO_RUNNER_UNIT):
+                 "hermes-forgejo", FORGEJO_RUNNER_UNIT, CODECHECKER_UNIT):
         run(["podman", "rm", "-f", name], check=False, quiet=True)
     start_stack(cfg)
 
@@ -1061,6 +1176,8 @@ def banner(cfg: dict[str, str]) -> None:
     if sourcebot_up:
         log("Sourcebot:   http://127.0.0.1:8181")
     log("Forgejo:     http://127.0.0.1:3000  (git forge + Actions)")
+    if unit_active(CODECHECKER_UNIT + ".service"):
+        log("CodeChecker: http://127.0.0.1:8001  (C/C++ static analysis, product Default)")
     root_url = cfg.get("FORGEJO_ROOT_URL", "").rstrip("/")
     if root_url:
         log(f"Tailscale:   {root_url}        (Hermes :443)")
