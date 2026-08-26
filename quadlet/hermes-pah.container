@@ -8,6 +8,8 @@ Network=hermesnet.network
 Environment=PAH_TOKEN={{PAH_TOKEN}}
 Environment=GLM_API_KEY={{GLM_API_KEY}}
 Environment=ALIBABA_TOKEN_PLAN_API_KEY={{ALIBABA_TOKEN_PLAN_API_KEY}}
+Environment=PAH_WEBHOOK_URL=http://hermes-webui:8644/webhooks/pah-task
+Environment=PAH_WEBHOOK_SECRET={{PAH_WEBHOOK_SECRET}}
 # Same host tree the OC server mounts — MUST stay :z (shared MCS label)
 # so pah/opencode/webui can all read the bind. rw so delegated tasks write
 # sibling repos (accepted stage-1 trade, see the spec's Security section).
