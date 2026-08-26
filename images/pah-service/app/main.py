@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -58,6 +59,7 @@ import uuid
 from collections import deque
 from pathlib import Path, PurePosixPath
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -204,6 +206,33 @@ REGISTRY_LOCK = threading.Lock()
 TASKS: dict[str, dict] = {}
 
 
+# --- terminal-transition webhook (push, no polling) -------------------------
+WEBHOOK_URL = os.environ.get("PAH_WEBHOOK_URL", "")
+WEBHOOK_SECRET = os.environ.get("PAH_WEBHOOK_SECRET", "")
+
+
+async def _notify_webhook(payload: dict) -> None:
+    """Fire-and-forget terminal-transition push (generic HMAC V2).
+    A webhook failure must NEVER affect the task pipeline."""
+    if not WEBHOOK_URL or not WEBHOOK_SECRET:
+        return
+    try:
+        body = json.dumps(payload).encode()
+        ts = str(int(time.time()))
+        sig = hmac.new(WEBHOOK_SECRET.encode(), ts.encode() + b"." + body,
+                       hashlib.sha256).hexdigest()
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.post(WEBHOOK_URL, content=body, headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Signature-V2": sig,
+                "X-Webhook-Timestamp": ts,
+            })
+            if r.status_code >= 300:
+                print(f"[webhook] {payload.get('task_id')} push -> {r.status_code}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[webhook] {payload.get('task_id')} push failed: {e}", flush=True)
+
+
 class RepoBusy(Exception):
     """The repo already has a running task (→ HTTP 409 repo busy)."""
 
@@ -258,11 +287,18 @@ def _finish_task(task_id: str, status: str, exit_code: int | None) -> None:
             return
         e["status"] = status
         e["exit_code"] = exit_code
+        payload = _task_summary(dict(e))
+        payload["event_type"] = "pah_task_finished"
+        payload["duration_s"] = round(time.time() - e["started_at"], 1)
         finished = [tid for tid, t in TASKS.items() if t["status"] != "running"]
         finished.sort(key=lambda tid: TASKS[tid]["started_at"])
         drop = max(0, len(finished) - MAX_FINISHED_TASKS)
         for tid in finished[:drop]:
             TASKS.pop(tid, None)
+    try:
+        asyncio.get_running_loop().create_task(_notify_webhook(payload))
+    except RuntimeError:
+        pass
 
 
 def _task_summary(e: dict) -> dict:

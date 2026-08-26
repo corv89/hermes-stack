@@ -23,6 +23,13 @@ Environment=HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
 Environment=HERMES_WEBUI_AUTO_INSTALL=1
 Environment=HERMES_WEBUI_AGENT_DIR=/usr/local/lib/hermes-agent
 Environment=HERMES_WEBUI_PASSWORD={{HERMES_WEBUI_PASSWORD}}
+# Dashboard backend (Hermes Desktop Remote Gateway attach point).
+Environment=HERMES_DASHBOARD=1
+Environment=HERMES_DASHBOARD_HOST=0.0.0.0
+Environment=HERMES_DASHBOARD_PORT=9119
+Environment=HERMES_DASHBOARD_BASIC_AUTH_USERNAME={{HERMES_DASHBOARD_BASIC_AUTH_USERNAME}}
+Environment=HERMES_DASHBOARD_BASIC_AUTH_PASSWORD={{HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}}
+Environment=HERMES_DASHBOARD_BASIC_AUTH_SECRET={{HERMES_DASHBOARD_BASIC_AUTH_SECRET}}
 Environment=OPENCODE_SERVER_URL=http://hermes-opencode:45650
 Environment=OPENCODE_SERVER_USER=opencode
 Environment=OPENCODE_SERVER_PASS={{OPENCODE_PASSWORD}}
@@ -34,6 +41,24 @@ Environment=SEARXNG_URL=http://hermes-searxng:8080
 Environment=TRAFILATURA_URL=http://hermes-trafilatura:8000
 Environment=PLAYWRIGHT_URL=http://hermes-playwright:8001
 Environment=PAH_TOKEN={{PAH_TOKEN}}
+#BUZZ-BEGIN
+# Buzz (buzz.xyz Nostr community platform) — optional. run.py drops this whole
+# block (comment lines included) unless BUZZ_RELAY_URL + BUZZ_PRIVATE_KEY are
+# both set in .env, and prunes env lines whose value renders empty (unset
+# optional keys are not passed at all, never passed empty). The nsec is the
+# only Buzz secret; it comes from the host .env and lives nowhere else.
+Environment=BUZZ_RELAY_URL={{BUZZ_RELAY_URL}}
+Environment=BUZZ_PRIVATE_KEY={{BUZZ_PRIVATE_KEY}}
+Environment=BUZZ_HOME_CHANNEL={{BUZZ_HOME_CHANNEL}}
+Environment=BUZZ_CHANNELS={{BUZZ_CHANNELS}}
+Environment=BUZZ_ALLOWED_USERS={{BUZZ_ALLOWED_USERS}}
+Environment=BUZZ_ALLOW_ALL_USERS={{BUZZ_ALLOW_ALL_USERS}}
+Environment=BUZZ_POLL_INTERVAL={{BUZZ_POLL_INTERVAL}}
+Environment=BUZZ_TRANSPORT={{BUZZ_TRANSPORT}}
+Environment=BUZZ_AUTH_TAG={{BUZZ_AUTH_TAG}}
+Environment=BUZZ_CLI_PATH={{BUZZ_CLI_PATH}}
+Environment=BUZZ_CREDENTIALS_FILE={{BUZZ_CREDENTIALS_FILE}}
+#BUZZ-END
 Volume=hermes-data:/home/hermeswebui/.hermes
 # keep-id cannot chown the image-owned /home/hermeswebui; give the agent's
 # dot-dirs their own volumes so uid 1000 can create/write them.
@@ -43,6 +68,7 @@ Volume={{PROJECT_MOUNT}}:/work:ro,z
 Volume={{REPO}}/hermes-workspace:/workspace:rw,z
 Volume=pah-runs:/pah-runs:ro,z
 PublishPort=127.0.0.1:8787:8787
+PublishPort=127.0.0.1:9119:9119
 
 [Service]
 Restart=on-failure

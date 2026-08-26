@@ -70,12 +70,15 @@ QUADLET_SRC = SCRIPT_DIR / "quadlet"
 UNIT_DIR = Path.home() / ".config" / "containers" / "systemd"
 # Plain systemd units (non-quadlet) live in the regular user unit dir.
 SYSTEMD_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
-PROJECT_MOUNT = os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src"))
+PROJECT_MOUNT = Path(os.environ.get("PROJECT_MOUNT", str(Path.home() / "Src")))
 GBRAIN_DATA_DIR = Path(os.environ.get("GBRAIN_DATA_DIR", "/opt/gbrain-data"))
 # Forgejo data dir is created once by the user with sudo (the container's
 # entrypoint must chown it); run.py only warns when it is absent.
 FORGEJO_DATA_DIR = Path("/opt/forgejo-data")
 FORGEJO_RUNNER_DIR = Path("/opt/forgejo-runner")
+# Host path for the CodeChecker server workspace (deliberately NOT under
+# GBRAIN_DATA_DIR — analysis artifacts are their own tree).
+CODECHECKER_WORKSPACE_DIR = Path("/opt/codechecker/workspace")
 HERMES_DATA_VOL = (Path.home() /
                    ".local/share/containers/storage/volumes/hermes-data/_data")
 
@@ -184,6 +187,9 @@ SENSITIVE = {
     "GBRAIN_ADMIN_BOOTSTRAP_TOKEN",
     "GBRAIN_ADMIN_TOKEN",
     "FORGEJO_ADMIN_PASSWORD",
+    "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+    "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
+    "BUZZ_PRIVATE_KEY",
 }
 
 # Deep-merged into the Hermes config.yaml on the hermes-data volume (the
@@ -310,6 +316,22 @@ mcp_servers:
       Authorization: "Bearer {gbrain_token}"
 """
 
+# Appended to HERMES_CONFIG_YAML (pre-parse) when the Buzz credential pair is
+# set in .env — never appended otherwise, so a creds-less gateway block can't
+# read as "platform enabled" and break gateway startup. Channel hygiene per
+# the upstream Buzz integration guidance: mention-gated, no interim assistant
+# chatter, no tool-progress noise, private mode (only BUZZ_ALLOWED_USERS npubs
+# get answers). Same str.format() rule as HERMES_CONFIG_YAML: no braces.
+# tool_progress is quoted: bare YAML `off` parses as a boolean False.
+BUZZ_CONFIG_YAML = """\
+gateway:
+  buzz:
+    interim_assistant_messages: false
+    tool_progress: "off"
+    require_mention: true
+    allow_all_users: false
+"""
+
 # Podman secrets used by the stack, mapped to a scratch env name used only for
 # the whitespace pre-flight check (so a bad one is reported by secret name).
 SECRETS = [
@@ -406,7 +428,12 @@ CONFIG_SYNC_UNIT = "hermes-config-sync"
 # file exists, so forgejo_bootstrap() starts it explicitly. It belongs in
 # ALL_UNITS so --stop/--redeploy cover it.
 FORGEJO_RUNNER_UNIT = "hermes-forgejo-runner"
-ALL_UNITS = CONTAINER_UNITS + [CONFIG_SYNC_UNIT, FORGEJO_RUNNER_UNIT]
+# Same shape as the runner: codechecker can only start once its Postgres
+# role + databases exist, so codechecker_bootstrap() starts it explicitly.
+# It belongs in ALL_UNITS so --stop/--redeploy/status cover it.
+CODECHECKER_UNIT = "hermes-codechecker"
+ALL_UNITS = CONTAINER_UNITS + [CONFIG_SYNC_UNIT, FORGEJO_RUNNER_UNIT,
+                               CODECHECKER_UNIT]
 
 # Readiness gates, checked from the host against the localhost-published ports.
 # (name, url or "pg", timeout_s, require_2xx, fatal)
@@ -423,6 +450,7 @@ GATES = [
     ("hermes-sourcebot",  "http://127.0.0.1:8181/",                        60,  False, False),
     ("hermes-forgejo",    "http://127.0.0.1:3000/",                        120, False, False),
     ("hermes-webui",      "http://127.0.0.1:8787/",                        180, False, True),
+    ("hermes-dashboard",   "http://127.0.0.1:9119/api/status",              120,  False, True),
     ("hermes-node-exporter", "http://127.0.0.1:9100/metrics", 30, False, False),
     ("hermes-gpu-exporter", "http://127.0.0.1:9101/metrics", 30, False, False),
     ("hermes-podman-exporter", "http://127.0.0.1:9102/metrics", 30, False, False),
@@ -489,6 +517,27 @@ def sourcebot_root(cfg: dict[str, str]) -> Path:
     return Path(cfg.get("SOURCEBOT_HOME", str(PROJECT_MOUNT / "sourcebot")))
 
 
+_BUZZ_BLOCK_RE = re.compile(r"^#BUZZ-BEGIN\n.*?\n#BUZZ-END\n", re.S | re.M)
+_BUZZ_EMPTY_ENV_RE = re.compile(r"^Environment=BUZZ_[A-Z_]+=$")
+
+
+def _gate_buzz_block(text: str, cfg: dict[str, str]) -> str:
+    """Buzz is opt-in. Without both BUZZ_RELAY_URL and BUZZ_PRIVATE_KEY in
+    .env, drop the whole #BUZZ-BEGIN..#BUZZ-END quadlet block: the gateway
+    then starts exactly as before, with the platform absent (and no literal
+    {{...}} placeholders survive — every Buzz key is in subs). With the pair
+    set, keep the block but drop lines whose value rendered empty, so unset
+    optional keys are not passed as set-but-empty strings."""
+    m = _BUZZ_BLOCK_RE.search(text)
+    if not m:
+        return text
+    if not (cfg.get("BUZZ_RELAY_URL") and cfg.get("BUZZ_PRIVATE_KEY")):
+        return text.replace(m.group(0), "")
+    kept = [ln for ln in m.group(0).splitlines()
+            if not _BUZZ_EMPTY_ENV_RE.match(ln)]
+    return text.replace(m.group(0), "\n".join(kept) + "\n")
+
+
 def render_units(cfg: dict[str, str]) -> dict[str, str]:
     subs = {
         "HOME": str(Path.home()),
@@ -515,6 +564,28 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         # fallback pattern); hermes-pah and the webui render together in this
         # one pass, so the pair always matches.
         "PAH_TOKEN": cfg.get("PAH_TOKEN") or secrets.token_hex(20),
+        # Dashboard basic auth (Desktop Remote Gateway). REQUIRED, not minted:
+        # a re-minted secret on redeploy would invalidate Desktop's saved
+        # sign-in, so fail fast instead of auto-generating.
+        "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": cfg["HERMES_DASHBOARD_BASIC_AUTH_USERNAME"],
+        "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": cfg["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"],
+        "HERMES_DASHBOARD_BASIC_AUTH_SECRET": cfg["HERMES_DASHBOARD_BASIC_AUTH_SECRET"],
+        # Buzz platform (optional): the #BUZZ-BEGIN..#BUZZ-END block in
+        # hermes-webui.container is dropped entirely unless the credential
+        # pair is set (see _gate_buzz_block), so empty defaults here are only
+        # ever a render detail — unset keys are never passed to the gateway.
+        "BUZZ_RELAY_URL": cfg.get("BUZZ_RELAY_URL", ""),
+        "BUZZ_PRIVATE_KEY": cfg.get("BUZZ_PRIVATE_KEY", ""),
+        "BUZZ_HOME_CHANNEL": cfg.get("BUZZ_HOME_CHANNEL", ""),
+        "BUZZ_CHANNELS": cfg.get("BUZZ_CHANNELS", ""),
+        "BUZZ_ALLOWED_USERS": cfg.get("BUZZ_ALLOWED_USERS", ""),
+        # Private mode by default; explicit .env value (e.g. "true") wins.
+        "BUZZ_ALLOW_ALL_USERS": cfg.get("BUZZ_ALLOW_ALL_USERS", "") or "false",
+        "BUZZ_POLL_INTERVAL": cfg.get("BUZZ_POLL_INTERVAL", ""),
+        "BUZZ_TRANSPORT": cfg.get("BUZZ_TRANSPORT", ""),
+        "BUZZ_AUTH_TAG": cfg.get("BUZZ_AUTH_TAG", ""),
+        "BUZZ_CLI_PATH": cfg.get("BUZZ_CLI_PATH", ""),
+        "BUZZ_CREDENTIALS_FILE": cfg.get("BUZZ_CREDENTIALS_FILE", ""),
     }
     if not sourcebot_root(cfg).is_dir():
         log(f"  sourcebot: {sourcebot_root(cfg)} not found — skipping the "
@@ -528,6 +599,7 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         text = f.read_text()
         for key, val in subs.items():
             text = text.replace("{{" + key + "}}", str(val))
+        text = _gate_buzz_block(text, cfg)
         units[f.name] = text
     return units
 
@@ -722,6 +794,10 @@ def write_hermes_config(gbrain_access: str) -> None:
     config_yaml = HERMES_CONFIG_YAML.format(
         gbrain_token=gbrain_access or "MISSING",
         alibaba_key=alibaba_key)
+    # Buzz channel-hygiene block: only when the platform is configured (the
+    # gateway must stay cleanly platform-less without credentials).
+    if env.get("BUZZ_RELAY_URL") and env.get("BUZZ_PRIVATE_KEY"):
+        config_yaml += BUZZ_CONFIG_YAML
     target = HERMES_DATA_VOL / "config.yaml"
     merged_yaml = config_yaml
     if _HAS_YAML and target.exists():
@@ -959,11 +1035,107 @@ def forgejo_bootstrap(cfg: dict[str, str]) -> None:
         log(f"WARN: Forgejo bootstrap failed: {e}")
 
 
+# --- codechecker ---------------------------------------------------------------
+# Idempotent \gexec SQL: each guard SELECT emits the DDL string only when the
+# object is missing; \gexec executes what was selected (no rows = no-op).
+_CODECHECKER_DB_SQL = """\
+SELECT 'CREATE ROLE codechecker LOGIN'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'codechecker')\\gexec
+SELECT 'CREATE DATABASE codechecker_config'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'codechecker_config')\\gexec
+SELECT 'CREATE DATABASE default_product'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'default_product')\\gexec
+GRANT ALL PRIVILEGES ON DATABASE codechecker_config TO codechecker;
+GRANT ALL PRIVILEGES ON DATABASE default_product TO codechecker;
+"""
+
+# PG15+ gotcha: non-owners have no CREATE on schema public — without this
+# grant CodeChecker's first table creation fails ("permission denied for
+# schema public"). Needed in EACH database.
+_CODECHECKER_SCHEMA_GRANT_SQL = "GRANT ALL ON SCHEMA public TO codechecker;\n"
+
+
+def codechecker_bootstrap(cfg: dict[str, str]) -> None:
+    """Idempotent CodeChecker role/database/product bootstrap.
+
+    Static analysis is an add-on: every step is warn-and-continue, nothing
+    here is ever fatal to the core stack (forgejo_bootstrap precedent).
+    cfg is unused today; kept for call-site symmetry."""
+    try:
+        if not CODECHECKER_WORKSPACE_DIR.is_dir():
+            log(f"WARN: {CODECHECKER_WORKSPACE_DIR} missing — CodeChecker "
+                "bootstrap skipped (one-time host prep, README → Static "
+                "analysis)")
+            return
+        if not pg_ready():
+            log("WARN: hermes-gbrain-pg not ready — CodeChecker "
+                "bootstrap skipped")
+            return
+
+        psql = ["podman", "exec", "-i", "hermes-gbrain-pg", "psql", "-U", "gbrain"]
+        run(psql + ["-d", "postgres"], input_text=_CODECHECKER_DB_SQL)
+        for db in ("codechecker_config", "default_product"):
+            run(psql + ["-d", db], input_text=_CODECHECKER_SCHEMA_GRANT_SQL)
+        log("  CodeChecker role + databases ensured (codechecker_config, "
+            "default_product)")
+
+        # Start the unit (not in CONTAINER_UNITS — runner precedent).
+        svc = CODECHECKER_UNIT + ".service"
+        if systemctl_user("is-failed", svc, check=False).returncode == 0:
+            systemctl_user("reset-failed", svc, check=False)
+        if not unit_active(svc):
+            systemctl_user("start", svc)
+
+        # /ready returns 200 + CODECHECKER_SERVER_IS_READY once the DB is
+        # reachable. Non-fatal gate: skip registration if it never comes up.
+        if not wait_gate(CODECHECKER_UNIT, "http://127.0.0.1:8001/ready",
+                         90, True, False):
+            log("WARN: CodeChecker /ready gate failed — product "
+                "registration skipped")
+            return
+
+        # The Default product is NOT auto-created in Postgres mode.
+        r = run(["podman", "exec", CODECHECKER_UNIT, "CodeChecker", "cmd",
+                 "products", "list"], check=False, quiet=True)
+        if "Default" in (r.stdout or ""):
+            log("  CodeChecker product 'Default' already registered")
+        else:
+            r = run(["podman", "exec", CODECHECKER_UNIT, "CodeChecker", "cmd",
+                     "products", "add", "Default",
+                     "--name", "Default Product", "--postgresql",
+                     "--db-host", "hermes-gbrain-pg", "--db-port", "5432",
+                     "--db-username", "codechecker",
+                     "--db-name", "default_product"], check=False, quiet=True)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip().splitlines()
+                log(f"WARN: CodeChecker products add Default: "
+                    f"{err[0] if err else 'exit ' + str(r.returncode)}")
+            else:
+                log("  CodeChecker product 'Default' registered")
+
+        if http_up("http://127.0.0.1:8001/Default"):
+            log("  CodeChecker product endpoint "
+                "http://127.0.0.1:8001/Default live")
+        else:
+            log("  product endpoint not live yet — restarting once ...")
+            systemctl_user("restart", svc, check=False)
+            wait_gate(CODECHECKER_UNIT, "http://127.0.0.1:8001/ready",
+                      90, True, False)
+            if not http_up("http://127.0.0.1:8001/Default"):
+                log("WARN: http://127.0.0.1:8001/Default not responding "
+                    "(continuing)")
+    except Exception as e:  # add-on: never fatal to the core stack
+        log(f"WARN: CodeChecker bootstrap failed: {e}")
+
+
 # --- orchestration ------------------------------------------------------------
 def load_cfg() -> dict[str, str]:
     cfg = load_env(SCRIPT_DIR / ".env")
     for key in ("OPENCODE_SERVER_PASSWORD", "HERMES_WEBUI_PASSWORD",
-                "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN", "FORGEJO_ADMIN_PASSWORD"):
+                "ZAI_API_KEY", "GBRAIN_ADMIN_TOKEN", "FORGEJO_ADMIN_PASSWORD",
+                "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
+                "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+                "HERMES_DASHBOARD_BASIC_AUTH_SECRET"):
         if not cfg.get(key):
             log(f"ERROR: {key} must be set in .env")
             sys.exit(1)
@@ -985,6 +1157,17 @@ def prepare_dirs() -> None:
     except OSError as e:
         log(f"WARN: could not prepare Forgejo runner dirs ({e}); "
             "see README → Forgejo (git forge) host prep")
+
+    # CodeChecker workspace (host path owned by the stack user, NOT under
+    # GBRAIN_DATA_DIR). /opt may be root-owned on a fresh host: this warns
+    # like the Forgejo prep and the one-time sudo command is in the message.
+    try:
+        CODECHECKER_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        CODECHECKER_WORKSPACE_DIR.chmod(0o700)
+    except OSError as e:
+        log(f"WARN: could not prepare {CODECHECKER_WORKSPACE_DIR} ({e}); "
+            "one-time host prep: sudo mkdir -p /opt/codechecker/workspace"
+            f' && sudo chown -R "$USER" /opt/codechecker')
 
 
 def start_stack(cfg: dict[str, str]) -> None:
@@ -1017,6 +1200,9 @@ def start_stack(cfg: dict[str, str]) -> None:
     log("Forgejo bootstrap ...")
     forgejo_bootstrap(cfg)
 
+    log("CodeChecker bootstrap ...")
+    codechecker_bootstrap(cfg)
+
     banner(cfg)
 
 
@@ -1035,7 +1221,7 @@ def redeploy(cfg: dict[str, str]) -> None:
                  "hermes-llama-rerank", "hermes-gbrain-pg", "hermes-gbrain",
                  "hermes-searxng", "hermes-trafilatura", "hermes-playwright",
                  "sourcebot", "hermes-webui",  # rm -f is a no-op when absent
-                 "hermes-forgejo", FORGEJO_RUNNER_UNIT):
+                 "hermes-forgejo", FORGEJO_RUNNER_UNIT, CODECHECKER_UNIT):
         run(["podman", "rm", "-f", name], check=False, quiet=True)
     start_stack(cfg)
 
@@ -1061,6 +1247,8 @@ def banner(cfg: dict[str, str]) -> None:
     if sourcebot_up:
         log("Sourcebot:   http://127.0.0.1:8181")
     log("Forgejo:     http://127.0.0.1:3000  (git forge + Actions)")
+    if unit_active(CODECHECKER_UNIT + ".service"):
+        log("CodeChecker: http://127.0.0.1:8001  (C/C++ static analysis, product Default)")
     root_url = cfg.get("FORGEJO_ROOT_URL", "").rstrip("/")
     if root_url:
         log(f"Tailscale:   {root_url}        (Hermes :443)")
