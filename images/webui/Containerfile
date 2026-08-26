@@ -1,3 +1,32 @@
+# --- buzz CLI builder stage ---------------------------------------------------
+# buzz (buzz.xyz, Block's open-source Nostr workspace) ships a `buzz` CLI that
+# the bundled Hermes buzz platform adapter (plugins/platforms/buzz) shells out
+# to. Upstream v0.5.2 publishes only Desktop GUI bundles (dmg/AppImage/deb/exe)
+# — no CLI artifact — so the CLI is built from source at a pinned tag and only
+# the release binary is copied into the runtime image (keeps it lean;
+# containerized-build convention). trixie matches the runtime base (glibc).
+# Toolchain: workspace MSRV is rust 1.88 / edition 2021 -> rust:1.90 works.
+# rustls-only tree (reqwest/tokio-tungstenite/rustls "ring"), so no
+# pkg-config/libssl-dev; ring 0.17 + the cc crate DO need a C toolchain (the
+# *-slim images ship none), hence build-essential, and cmake for the one
+# cmake-using crate in the lock.
+# Refresh: resolve the new tag (git ls-remote --tags
+# https://github.com/block/buzz or the releases page), bump BUZZ_REF, rebuild.
+FROM docker.io/library/rust:1.90-slim-trixie AS buzz-cli-build
+ARG BUZZ_REF=v0.5.2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates curl build-essential cmake \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/block/buzz/archive/refs/tags/${BUZZ_REF}.tar.gz" \
+       | tar -xz -C /tmp \
+    && cd /tmp/buzz-* \
+    && cargo build --release --locked -p buzz-cli \
+    # crates/buzz-cli declares [[bin]] name = "buzz"; keep the fallback in case
+    # a future pin renames it to buzz-cli.
+    && cp target/release/buzz /buzz-cli 2>/dev/null \
+       || cp target/release/buzz-cli /buzz-cli
+
 # Base pinned by digest 2026-08-17 (was :latest; silent drift broke the
 # build — see libatomic1 note below). To refresh: pull latest locally,
 # verify, resolve new digest, update here.
@@ -168,6 +197,11 @@ COPY --chmod=755 bin/ocm /usr/local/bin/ocm
 # Bake the `pc` client (PAH one-liner against the hermes-pah service;
 # X-PAH-Token from the webui's PAH_TOKEN env — zero new mounts or sockets).
 COPY --chmod=755 bin/pc /usr/local/bin/pc
+
+# Bake the buzz CLI (builder stage above): the agent's buzz platform adapter
+# invokes it; BUZZ_CLI_PATH unset -> PATH lookup finds /usr/local/bin/buzz.
+COPY --from=buzz-cli-build /buzz-cli /usr/local/bin/buzz
+RUN test -x /usr/local/bin/buzz && /usr/local/bin/buzz --help >/dev/null
 
 # Rootless (keep-id) startup: the init's /app seed uses `cp -a`, which fails
 # preserving attributes on the root-owned /app dir itself ("Operation not

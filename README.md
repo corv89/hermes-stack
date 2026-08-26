@@ -176,6 +176,88 @@ printf '%s' "$VALUE" | podman secret create <name> -
 > Use `printf '%s'`, not `echo`. A trailing newline makes external APIs reject
 > the key. `run.py` runs a pre-flight check that warns about whitespace.
 
+Optional Buzz platform keys also live in `.env` — see *Buzz (optional Nostr
+messaging)*.
+
+## Buzz (optional Nostr messaging)
+
+[Buzz] (buzz.xyz) is Block's open-source Nostr workspace for humans and
+agents. Integration path ③ — the native gateway platform — joins Buzz as a
+first-class Hermes messaging platform (channels, DMs, mention gating,
+threaded replies, cron delivery) while keeping full Hermes memory, skills
+and approvals. The platform plugin ships with the installed hermes-agent
+(`plugins/platforms/buzz`), and the `buzz` CLI the adapter shells out to is
+baked into the webui image at `/usr/local/bin/buzz` (built from a pinned
+upstream tag in `images/webui/Containerfile`).
+
+Every key is optional in `.env` — enable by setting both required-to-enable
+keys; the default (all unset) leaves the platform off and the gateway
+untouched:
+
+| Key | Enable | Purpose |
+|-----|--------|---------|
+| `BUZZ_RELAY_URL` | yes | community relay URL |
+| `BUZZ_PRIVATE_KEY` | yes | agent's Nostr identity (nsec) — the only Buzz secret |
+| `BUZZ_HOME_CHANNEL` | no | default channel; also the `deliver=buzz` cron target |
+| `BUZZ_CHANNELS` | no | comma-separated channel allowlist |
+| `BUZZ_ALLOWED_USERS` | no | npubs that may talk to the agent (private mode) |
+| `BUZZ_ALLOW_ALL_USERS` | no | keep `false` — private mode is the default |
+| `BUZZ_POLL_INTERVAL` | no | poll transport interval in seconds (default 4) |
+| `BUZZ_TRANSPORT` | no | `auto` \| `websocket` \| `poll` |
+| `BUZZ_AUTH_TAG` | no | relay auth tag, if the community requires one |
+| `BUZZ_CLI_PATH` | no | default: `buzz` on PATH (baked into the image) |
+| `BUZZ_CREDENTIALS_FILE` | no | CLI state; point at the hermes-data volume so it survives redeploys |
+
+You generate the nsec — with any Nostr key tool — and join the community
+relay as that identity yourself; the pod never generates or rotates keys.
+Membership is enforced by the relay, not by Hermes.
+
+**Wiring.** With both required keys set, `run.py` renders the `BUZZ_*` env
+into the hermes-webui unit and appends the `gateway.buzz` channel-hygiene
+block to `config.yaml`. With either missing, the whole env block is dropped
+and no `gateway.buzz` config is written — the gateway starts exactly as
+before with the platform simply absent (no crash, no literal `{{...}}`
+placeholders in the rendered unit). Unset optional keys are not passed at
+all, never as empty strings. Re-run `python3 run.py` after editing `.env`:
+rendered units are not live-edited. Env names follow the installed adapter —
+`plugins/platforms/buzz/adapter.py` is the source of truth if docs disagree.
+
+**Channel hygiene** — re-applied by every `run.py --config-sync`; edit
+`BUZZ_CONFIG_YAML` in `run.py` to change them canonically:
+
+- `require_mention: true` — the agent answers only when mentioned; a
+  non-mentioned message is ignored.
+- `interim_assistant_messages: false` — no interim assistant chatter.
+- `tool_progress: "off"` — no tool-progress noise in the channel.
+- `allow_all_users: false` — private mode: only `BUZZ_ALLOWED_USERS` npubs
+  get answers.
+
+Cron jobs with `deliver=buzz` fire into `BUZZ_HOME_CHANNEL`. The nsec lives
+only in the host `.env` and the user-only rendered unit (mode 600, same
+exposure class as `HERMES_WEBUI_PASSWORD`) — never in tracked files, argv
+or logs. Do not set `BUZZ_ALLOW_ALL_USERS=true` on a public relay.
+
+Bring-up checklist (on the host):
+
+```bash
+python3 run.py --build                                # webui rebuild picks up the buzz CLI stage
+podman run --rm localhost/hermes-webui:latest buzz --help          # CLI runs in the fresh image
+podman run --rm localhost/hermes-webui:latest \
+  ls /usr/local/lib/hermes-agent/plugins/platforms/buzz/           # plugin bundled
+$EDITOR .env                                          # set BUZZ_RELAY_URL + BUZZ_PRIVATE_KEY (+ optionals)
+python3 run.py                                        # re-render env + config-sync + restart webui
+python3 run.py --render | sed -n '/hermes-webui/,/^=====/p'       # eyeball: BUZZ block, no placeholders
+podman exec hermes-webui hermes gateway status        # buzz platform listed (absent before)
+tail -f ~/hermes/logs/gateway-stdout.log              # joined relay / channels
+```
+
+Then mention the agent in `BUZZ_HOME_CHANNEL`: the reply must thread, and a
+non-mentioned message must be ignored (`require_mention`). Off-switch check:
+comment the two `.env` keys, re-run `python3 run.py`, and
+`hermes gateway status` shows no buzz and no errors.
+
+[Buzz]: https://buzz.xyz
+
 ## Host file access (keep-id)
 
 `hermes-webui` runs with `UserNS=keep-id`: container uid 1000 is the host user.

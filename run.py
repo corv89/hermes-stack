@@ -189,6 +189,7 @@ SENSITIVE = {
     "FORGEJO_ADMIN_PASSWORD",
     "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
     "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
+    "BUZZ_PRIVATE_KEY",
 }
 
 # Deep-merged into the Hermes config.yaml on the hermes-data volume (the
@@ -313,6 +314,22 @@ mcp_servers:
     url: http://hermes-gbrain:8083/mcp
     headers:
       Authorization: "Bearer {gbrain_token}"
+"""
+
+# Appended to HERMES_CONFIG_YAML (pre-parse) when the Buzz credential pair is
+# set in .env — never appended otherwise, so a creds-less gateway block can't
+# read as "platform enabled" and break gateway startup. Channel hygiene per
+# the upstream Buzz integration guidance: mention-gated, no interim assistant
+# chatter, no tool-progress noise, private mode (only BUZZ_ALLOWED_USERS npubs
+# get answers). Same str.format() rule as HERMES_CONFIG_YAML: no braces.
+# tool_progress is quoted: bare YAML `off` parses as a boolean False.
+BUZZ_CONFIG_YAML = """\
+gateway:
+  buzz:
+    interim_assistant_messages: false
+    tool_progress: "off"
+    require_mention: true
+    allow_all_users: false
 """
 
 # Podman secrets used by the stack, mapped to a scratch env name used only for
@@ -500,6 +517,27 @@ def sourcebot_root(cfg: dict[str, str]) -> Path:
     return Path(cfg.get("SOURCEBOT_HOME", str(PROJECT_MOUNT / "sourcebot")))
 
 
+_BUZZ_BLOCK_RE = re.compile(r"^#BUZZ-BEGIN\n.*?\n#BUZZ-END\n", re.S | re.M)
+_BUZZ_EMPTY_ENV_RE = re.compile(r"^Environment=BUZZ_[A-Z_]+=$")
+
+
+def _gate_buzz_block(text: str, cfg: dict[str, str]) -> str:
+    """Buzz is opt-in. Without both BUZZ_RELAY_URL and BUZZ_PRIVATE_KEY in
+    .env, drop the whole #BUZZ-BEGIN..#BUZZ-END quadlet block: the gateway
+    then starts exactly as before, with the platform absent (and no literal
+    {{...}} placeholders survive — every Buzz key is in subs). With the pair
+    set, keep the block but drop lines whose value rendered empty, so unset
+    optional keys are not passed as set-but-empty strings."""
+    m = _BUZZ_BLOCK_RE.search(text)
+    if not m:
+        return text
+    if not (cfg.get("BUZZ_RELAY_URL") and cfg.get("BUZZ_PRIVATE_KEY")):
+        return text.replace(m.group(0), "")
+    kept = [ln for ln in m.group(0).splitlines()
+            if not _BUZZ_EMPTY_ENV_RE.match(ln)]
+    return text.replace(m.group(0), "\n".join(kept) + "\n")
+
+
 def render_units(cfg: dict[str, str]) -> dict[str, str]:
     subs = {
         "HOME": str(Path.home()),
@@ -532,6 +570,22 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": cfg["HERMES_DASHBOARD_BASIC_AUTH_USERNAME"],
         "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": cfg["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"],
         "HERMES_DASHBOARD_BASIC_AUTH_SECRET": cfg["HERMES_DASHBOARD_BASIC_AUTH_SECRET"],
+        # Buzz platform (optional): the #BUZZ-BEGIN..#BUZZ-END block in
+        # hermes-webui.container is dropped entirely unless the credential
+        # pair is set (see _gate_buzz_block), so empty defaults here are only
+        # ever a render detail — unset keys are never passed to the gateway.
+        "BUZZ_RELAY_URL": cfg.get("BUZZ_RELAY_URL", ""),
+        "BUZZ_PRIVATE_KEY": cfg.get("BUZZ_PRIVATE_KEY", ""),
+        "BUZZ_HOME_CHANNEL": cfg.get("BUZZ_HOME_CHANNEL", ""),
+        "BUZZ_CHANNELS": cfg.get("BUZZ_CHANNELS", ""),
+        "BUZZ_ALLOWED_USERS": cfg.get("BUZZ_ALLOWED_USERS", ""),
+        # Private mode by default; explicit .env value (e.g. "true") wins.
+        "BUZZ_ALLOW_ALL_USERS": cfg.get("BUZZ_ALLOW_ALL_USERS", "") or "false",
+        "BUZZ_POLL_INTERVAL": cfg.get("BUZZ_POLL_INTERVAL", ""),
+        "BUZZ_TRANSPORT": cfg.get("BUZZ_TRANSPORT", ""),
+        "BUZZ_AUTH_TAG": cfg.get("BUZZ_AUTH_TAG", ""),
+        "BUZZ_CLI_PATH": cfg.get("BUZZ_CLI_PATH", ""),
+        "BUZZ_CREDENTIALS_FILE": cfg.get("BUZZ_CREDENTIALS_FILE", ""),
     }
     if not sourcebot_root(cfg).is_dir():
         log(f"  sourcebot: {sourcebot_root(cfg)} not found — skipping the "
@@ -545,6 +599,7 @@ def render_units(cfg: dict[str, str]) -> dict[str, str]:
         text = f.read_text()
         for key, val in subs.items():
             text = text.replace("{{" + key + "}}", str(val))
+        text = _gate_buzz_block(text, cfg)
         units[f.name] = text
     return units
 
@@ -739,6 +794,10 @@ def write_hermes_config(gbrain_access: str) -> None:
     config_yaml = HERMES_CONFIG_YAML.format(
         gbrain_token=gbrain_access or "MISSING",
         alibaba_key=alibaba_key)
+    # Buzz channel-hygiene block: only when the platform is configured (the
+    # gateway must stay cleanly platform-less without credentials).
+    if env.get("BUZZ_RELAY_URL") and env.get("BUZZ_PRIVATE_KEY"):
+        config_yaml += BUZZ_CONFIG_YAML
     target = HERMES_DATA_VOL / "config.yaml"
     merged_yaml = config_yaml
     if _HAS_YAML and target.exists():
