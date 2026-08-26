@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Container]
 ContainerName=hermes-codechecker
-Image=codechecker/codechecker-web:6.28.2
+Image=docker.io/codechecker/codechecker-web:6.28.2
 Network=hermesnet.network
 # The image has NO env-based DB config (verified against v6.28.2
 # entrypoint). Postgres wiring is CLI flags; Exec= overrides the default
